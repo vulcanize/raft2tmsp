@@ -22,9 +22,9 @@ import (
 
 	. "github.com/tendermint/go-common"
 	"github.com/tendermint/tmsp/types"
-//	"github.com/tendermint/tmsp/example/dummy"
+	"github.com/tendermint/tmsp/example/dummy"
 	"github.com/tendermint/tmsp/client"
-//	"github.com/tendermint/tmsp/server"
+	"github.com/tendermint/tmsp/server"
 
 	"golang.org/x/net/context"
 )
@@ -187,13 +187,11 @@ var tmspClient tmspcli.Client
 
 func runTMSPServer() {
 	// Start the listener
-	/*
 	var err error
 	tmspServer, err = server.NewServer("tcp://0.0.0.0:46658", "socket", dummy.NewDummyApplication())
 	if err != nil {
 		Exit(err.Error())
 	}
-	*/
 }
 
 func runTMSPClient() {
@@ -465,12 +463,11 @@ func (n *node) Tick() {
 	*/
 }
 
-func (n *node) Campaign(ctx context.Context) error { return n.step(ctx, pb.Message{Type: pb.MsgHup}) }
+func (n *node) Campaign(ctx context.Context) error { return nil /*return n.step(ctx, pb.Message{Type: pb.MsgHup}) */}
 
 func (n *node) Propose(ctx context.Context, data []byte) error {
 	res := tmspClient.AppendTxSync(data)
 	if res.Code == types.CodeType_OK {
-		print(string(res.Data))
 		n.readyc <- Ready{
 			Entries:          []pb.Entry{},
 			CommittedEntries: []pb.Entry{{Data: data, Type: pb.EntryNormal, Index: 1}},
@@ -490,11 +487,14 @@ func (n *node) Step(ctx context.Context, m pb.Message) error {
 }
 
 func (n *node) ProposeConfChange(ctx context.Context, cc pb.ConfChange) error {
+	/*
 	data, err := cc.Marshal()
 	if err != nil {
 		return err
 	}
 	return n.Step(ctx, pb.Message{Type: pb.MsgProp, Entries: []pb.Entry{{Type: pb.EntryConfChange, Data: data}}})
+	*/
+	return nil
 }
 
 // Step advances the state machine using msgs. The ctx.Err() will be returned,
@@ -527,6 +527,7 @@ func (n *node) Advance() {
 }
 
 func (n *node) ApplyConfChange(cc pb.ConfChange) *pb.ConfState {
+	/*
 	var cs pb.ConfState
 	select {
 	case n.confc <- cc:
@@ -537,41 +538,55 @@ func (n *node) ApplyConfChange(cc pb.ConfChange) *pb.ConfState {
 	case <-n.done:
 	}
 	return &cs
+	*/
+	return nil
 }
 
 func (n *node) Status() raft.Status {
+	/*
 	c := make(chan raft.Status)
 	n.status <- c
 	return <-c
+	*/
+	return raft.Status{}
 }
 
 func (n *node) ReportUnreachable(id uint64) {
+	/*
 	select {
 	case n.recvc <- pb.Message{Type: pb.MsgUnreachable, From: id}:
 	case <-n.done:
 	}
+	*/
 }
 
 func (n *node) ReportSnapshot(id uint64, status SnapshotStatus) {
+	/*
 	rej := status == SnapshotFailure
 
 	select {
 	case n.recvc <- pb.Message{Type: pb.MsgSnapStatus, From: id, Reject: rej}:
 	case <-n.done:
 	}
+	*/
 }
 
 func (n *node) TransferLeadership(ctx context.Context, lead, transferee uint64) {
+	/*
 	select {
 	// manually set 'from' and 'to', so that leader can voluntarily transfers its leadership
 	case n.recvc <- pb.Message{Type: pb.MsgTransferLeader, From: transferee, To: lead}:
 	case <-n.done:
 	case <-ctx.Done():
 	}
+	*/
 }
 
 func (n *node) ReadIndex(ctx context.Context, rctx []byte) error {
+	/*
 	return n.step(ctx, pb.Message{Type: pb.MsgReadIndex, Entries: []pb.Entry{{Data: rctx}}})
+	*/
+	return nil
 }
 /*
 func newReady(r *raft, prevSoftSt *SoftState, prevHardSt pb.HardState) Ready {
