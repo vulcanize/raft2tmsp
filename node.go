@@ -21,19 +21,13 @@ import (
 	pb "github.com/coreos/etcd/raft/raftpb"
 
 	. "github.com/tendermint/go-common"
+	rpcclient "github.com/tendermint/go-rpc/client"
+	"github.com/tendermint/tendermint/rpc/core/types"
 	"github.com/tendermint/tmsp/types"
 	"github.com/tendermint/tmsp/example/dummy"
-	"github.com/tendermint/tmsp/client"
 	"github.com/tendermint/tmsp/server"
 
 	"golang.org/x/net/context"
-)
-
-type SnapshotStatus int
-
-const (
-	SnapshotFinish  SnapshotStatus = 1
-	SnapshotFailure SnapshotStatus = 2
 )
 
 var (
@@ -43,147 +37,8 @@ var (
 	ErrStopped = errors.New("raft: stopped")
 )
 
-// SoftState provides state that is useful for logging and debugging.
-// The state is volatile and does not need to be persisted to the WAL.
-
-type SoftState struct {
-	Lead      uint64 // must use atomic operations to access; keep 64-bit aligned.
-	RaftState raft.StateType
-}
-
-func (a *SoftState) equal(b *SoftState) bool {
-	return a.Lead == b.Lead && a.RaftState == b.RaftState
-}
-
-// Ready encapsulates the entries and messages that are ready to read,
-// be saved to stable storage, committed or sent to other peers.
-// All fields in Ready are read-only.
-type Ready struct {
-	// The current volatile state of a Node.
-	// SoftState will be nil if there is no update.
-	// It is not required to consume or store SoftState.
-	*SoftState
-
-	// The current state of a Node to be saved to stable storage BEFORE
-	// Messages are sent.
-	// HardState will be equal to empty state if there is no update.
-	pb.HardState
-
-	// ReadState can be used for node to serve linearizable read requests locally
-	// when its applied index is greater than the index in ReadState.
-	// Note that the readState will be returned when raft receives msgReadIndex.
-	// The returned is only valid for the request that requested to read.
-	raft.ReadState
-
-	// Entries specifies entries to be saved to stable storage BEFORE
-	// Messages are sent.
-	Entries []pb.Entry
-
-	// Snapshot specifies the snapshot to be saved to stable storage.
-	Snapshot pb.Snapshot
-
-	// CommittedEntries specifies entries to be committed to a
-	// store/state-machine. These have previously been committed to stable
-	// store.
-	CommittedEntries []pb.Entry
-
-	// Messages specifies outbound messages to be sent AFTER Entries are
-	// committed to stable storage.
-	// If it contains a MsgSnap message, the application MUST report back to raft
-	// when the snapshot has been received or has failed by calling ReportSnapshot.
-	Messages []pb.Message
-}
-
-func isHardStateEqual(a, b pb.HardState) bool {
-	return a.Term == b.Term && a.Vote == b.Vote && a.Commit == b.Commit
-}
-
-// IsEmptyHardState returns true if the given HardState is empty.
-func IsEmptyHardState(st pb.HardState) bool {
-	return isHardStateEqual(st, emptyState)
-}
-
-// IsEmptySnap returns true if the given Snapshot is empty.
-func IsEmptySnap(sp pb.Snapshot) bool {
-	return sp.Metadata.Index == 0
-}
-
-func (rd Ready) containsUpdates() bool {
-	return rd.SoftState != nil || !IsEmptyHardState(rd.HardState) ||
-		!IsEmptySnap(rd.Snapshot) || len(rd.Entries) > 0 ||
-		len(rd.CommittedEntries) > 0 || len(rd.Messages) > 0 || rd.Index != raft.None
-}
-
-// Node represents a node in a raft cluster.
-type Node interface {
-	// Tick increments the internal logical clock for the Node by a single tick. Election
-	// timeouts and heartbeat timeouts are in units of ticks.
-	Tick()
-	// Campaign causes the Node to transition to candidate state and start campaigning to become leader.
-	Campaign(ctx context.Context) error
-	// Propose proposes that data be appended to the log.
-	Propose(ctx context.Context, data []byte) error
-	// ProposeConfChange proposes config change.
-	// At most one ConfChange can be in the process of going through consensus.
-	// Application needs to call ApplyConfChange when applying EntryConfChange type entry.
-	ProposeConfChange(ctx context.Context, cc pb.ConfChange) error
-	// Step advances the state machine using the given message. ctx.Err() will be returned, if any.
-	Step(ctx context.Context, msg pb.Message) error
-
-	// Ready returns a channel that returns the current point-in-time state.
-	// Users of the Node must call Advance after retrieving the state returned by Ready.
-	//
-	// NOTE: No committed entries from the next Ready may be applied until all committed entries
-	// and snapshots from the previous one have finished.
-	Ready() <-chan Ready
-
-	// Advance notifies the Node that the application has saved progress up to the last Ready.
-	// It prepares the node to return the next available Ready.
-	//
-	// The application should generally call Advance after it applies the entries in last Ready.
-	//
-	// However, as an optimization, the application may call Advance while it is applying the
-	// commands. For example. when the last Ready contains a snapshot, the application might take
-	// a long time to apply the snapshot data. To continue receiving Ready without blocking raft
-	// progress, it can call Advance before finishing applying the last ready.
-	Advance()
-	// ApplyConfChange applies config change to the local node.
-	// Returns an opaque ConfState protobuf which must be recorded
-	// in snapshots. Will never return nil; it returns a pointer only
-	// to match MemoryStorage.Compact.
-	ApplyConfChange(cc pb.ConfChange) *pb.ConfState
-
-	// TransferLeadership attempts to transfer leadership to the given transferee.
-	TransferLeadership(ctx context.Context, lead, transferee uint64)
-
-	// ReadIndex request a read state. The read state will be set in the ready.
-	// Read state has a read index. Once the application advances further than the read
-	// index, any linearizable read requests issued before the read request can be
-	// processed safely. The read state will have the same rctx attached.
-	//
-	// Note: the current implementation depends on the leader lease. If the clock drift is unbounded,
-	// leader might keep the lease longer than it should (clock can move backward/pause without any bound).
-	// ReadIndex is not safe in that case.
-	// TODO: add clock drift bound into raft configuration.
-	ReadIndex(ctx context.Context, rctx []byte) error
-
-	// Status returns the current status of the raft state machine.
-	Status() raft.Status
-	// ReportUnreachable reports the given node is not reachable for the last send.
-	ReportUnreachable(id uint64)
-	// ReportSnapshot reports the status of the sent snapshot.
-	ReportSnapshot(id uint64, status SnapshotStatus)
-	// Stop performs any necessary termination of the Node.
-	Stop()
-}
-
-type Peer struct {
-	ID      uint64
-	Context []byte
-}
-
 var tmspServer Service
-var tmspClient tmspcli.Client
+var RPCClient *rpcclient.ClientJSONRPC
 
 func runTMSPServer() {
 	// Start the listener
@@ -194,18 +49,14 @@ func runTMSPServer() {
 	}
 }
 
-func runTMSPClient() {
-	// Start the listener
-	var err error
-	tmspClient, err = tmspcli.NewClient("tcp://127.0.0.1:46658", "socket", false)
-	if err != nil {
-		Exit(err.Error())
-	}
+func runRPCClient() {
+	// Start the rpc client
+	RPCClient = rpcclient.NewClientJSONRPC("tcp://0.0.0.0:46657")
 }
 
 // StartNode returns a new Node given configuration and a list of raft peers.
 // It appends a ConfChangeAddNode entry for each given peer to the initial log.
-func StartNode(c *raft.Config, peers []Peer) Node {
+func StartNode(c *raft.Config, peers []raft.Peer) raft.Node {
 	/*
 	r := newRaft(c)
 	// become the follower at term 1 and apply initial configuration
@@ -237,14 +88,16 @@ func StartNode(c *raft.Config, peers []Peer) Node {
 		r.addNode(peer.ID)
 	}
 	*/
-	if tmspServer == nil {
-		/* Start the TMSP server */
-		runTMSPServer()
-	}
 
-	if tmspClient == nil {
+//	if tmspServer == nil {
 		/* Start the TMSP server */
-		runTMSPClient()
+//		runTMSPServer()
+//	}
+
+
+	if RPCClient == nil {
+		/* Start the RPC client */
+		runRPCClient()
 	}
 
 	n := newNode()
@@ -257,18 +110,18 @@ func StartNode(c *raft.Config, peers []Peer) Node {
 // The current membership of the cluster will be restored from the Storage.
 // If the caller has an existing state machine, pass in the last log index that
 // has been applied to it; otherwise use zero.
-func RestartNode(c *raft.Config) Node {
+func RestartNode(c *raft.Config) raft.Node {
 
 	//r := newRaft(c)
 
-	if tmspServer == nil {
-		/* Start the TMSP server */
-		runTMSPServer()
-	}
+//	if tmspServer == nil {
+//		/* Start the TMSP server */
+//		runTMSPServer()
+//	}
 
-	if tmspClient == nil {
-		/* Start the TMSP server */
-		runTMSPClient()
+	if RPCClient == nil {
+		/* Start the RPC client */
+		runRPCClient()
 	}
 
 	n := newNode()
@@ -283,7 +136,7 @@ type node struct {
 	recvc      chan pb.Message
 	confc      chan pb.ConfChange
 	confstatec chan pb.ConfState
-	readyc     chan Ready
+	readyc     chan raft.Ready
 	advancec   chan struct{}
 	tickc      chan struct{}
 	done       chan struct{}
@@ -299,7 +152,7 @@ func newNode() node {
 		recvc:      make(chan pb.Message),
 		confc:      make(chan pb.ConfChange),
 		confstatec: make(chan pb.ConfState),
-		readyc:     make(chan Ready),
+		readyc:     make(chan raft.Ready),
 		advancec:   make(chan struct{}),
 		// make tickc a buffered chan, so raft node can buffer some ticks when the node
 		// is busy processing raft messages. Raft node will resume process buffered
@@ -466,13 +319,24 @@ func (n *node) Tick() {
 func (n *node) Campaign(ctx context.Context) error { return nil /*return n.step(ctx, pb.Message{Type: pb.MsgHup}) */}
 
 func (n *node) Propose(ctx context.Context, data []byte) error {
-	res := tmspClient.AppendTxSync(data)
-	if res.Code == types.CodeType_OK {
-		n.readyc <- Ready{
-			Entries:          []pb.Entry{},
-			CommittedEntries: []pb.Entry{{Data: data, Type: pb.EntryNormal, Index: 1}},
-			Messages:         []pb.Message{},
+	var r core_types.TMResult
+	var res *core_types.ResultBroadcastTx
+	var err error
+	_, err = RPCClient.Call("broadcast_tx_commit", []interface{}{data}, &r)
+
+	if r != nil {
+		res = r.(*core_types.ResultBroadcastTx)
+		print("code "+res.Code.String()+" data "+string(res.Data)+"\n\n")
+		if res.Code == types.CodeType_OK {
+			n.readyc <- raft.Ready{
+				Entries:          []pb.Entry{},
+				CommittedEntries: []pb.Entry{{Data: res.Data, Type: pb.EntryNormal}},
+				Messages:         []pb.Message{},
+			}
 		}
+	} else {
+		print(err.Error()+"\n")
+		return err
 	}
 	return nil
 }
@@ -515,7 +379,7 @@ func (n *node) step(ctx context.Context, m pb.Message) error {
 	}
 }
 
-func (n *node) Ready() <-chan Ready { return n.readyc }
+func (n *node) Ready() <-chan raft.Ready { return n.readyc }
 
 func (n *node) Advance() {
 	/*
@@ -560,7 +424,7 @@ func (n *node) ReportUnreachable(id uint64) {
 	*/
 }
 
-func (n *node) ReportSnapshot(id uint64, status SnapshotStatus) {
+func (n *node) ReportSnapshot(id uint64, status raft.SnapshotStatus) {
 	/*
 	rej := status == SnapshotFailure
 
