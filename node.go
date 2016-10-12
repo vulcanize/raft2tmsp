@@ -16,16 +16,20 @@ package raft2tmsp
 
 import (
 	"errors"
+	"fmt"
+	"strings"
+	"time"
 
 	"github.com/coreos/etcd/raft"
 	pb "github.com/coreos/etcd/raft/raftpb"
 
-	. "github.com/tendermint/go-common"
 	rpcclient "github.com/tendermint/go-rpc/client"
+	cfg "github.com/tendermint/go-config"
+	tmnode "github.com/tendermint/tendermint/node"
+	tmcfg "github.com/tendermint/tendermint/config/tendermint"
 	"github.com/tendermint/tendermint/rpc/core/types"
+	tmtypes "github.com/tendermint/tendermint/types"
 	"github.com/tendermint/tmsp/types"
-	"github.com/tendermint/tmsp/example/dummy"
-	"github.com/tendermint/tmsp/server"
 
 	"golang.org/x/net/context"
 )
@@ -37,21 +41,20 @@ var (
 	ErrStopped = errors.New("raft: stopped")
 )
 
-var tmspServer Service
-var RPCClient *rpcclient.ClientJSONRPC
+func init_tm_files(c cfg.Config) {
+	privValidator := tmtypes.GenPrivValidator()
+	privValidator.SetFile(c.GetString("priv_validator_file"))
+	privValidator.Save()
 
-func runTMSPServer() {
-	// Start the listener
-	var err error
-	tmspServer, err = server.NewServer("tcp://0.0.0.0:46658", "socket", dummy.NewDummyApplication())
-	if err != nil {
-		Exit(err.Error())
+	genDoc := tmtypes.GenesisDoc{
+		ChainID: "chain",
 	}
-}
+	genDoc.Validators = []tmtypes.GenesisValidator{tmtypes.GenesisValidator{
+		PubKey: privValidator.PubKey,
+		Amount: 10,
+	}}
 
-func runRPCClient() {
-	// Start the rpc client
-	RPCClient = rpcclient.NewClientJSONRPC("tcp://0.0.0.0:46657")
+	genDoc.SaveAs(c.GetString("genesis_file"))
 }
 
 // StartNode returns a new Node given configuration and a list of raft peers.
@@ -89,18 +92,29 @@ func StartNode(c *raft.Config, peers []raft.Peer) raft.Node {
 	}
 	*/
 
-//	if tmspServer == nil {
-		/* Start the TMSP server */
-//		runTMSPServer()
-//	}
+	/* Run a tendermint Node */
 
+	config := tmcfg.GetConfig(fmt.Sprintf(".tendermint/node_%v", c.ID))
+	config.Set("node_id", c.ID)
+	config.Set("node_laddr", fmt.Sprintf("tcp://0.0.0.0:%v", 46655 + c.ID))
+	config.Set("rpc_laddr", fmt.Sprintf("tcp://0.0.0.0:%v", 46675 + c.ID))
+	config.Set("proxy_app", "nilapp")
 
-	if RPCClient == nil {
-		/* Start the RPC client */
-		runRPCClient()
+	seeds := []string{}
+	for _, peer := range peers {
+		if peer.ID != c.ID {
+			seeds = append(seeds, fmt.Sprintf("0.0.0.0:%v", 46655 + peer.ID))
+		}
 	}
+	config.Set("seeds", strings.Join(seeds, ","))
 
-	n := newNode()
+	init_tm_files(config)
+	go tmnode.RunNode(config)
+
+	time.Sleep(5*time.Second)
+
+	/* Create a raft2tmsp Node */
+	n := newNode(config)
 	n.logger = c.Logger
 	//go n.run()
 	return &n
@@ -114,17 +128,21 @@ func RestartNode(c *raft.Config) raft.Node {
 
 	//r := newRaft(c)
 
-//	if tmspServer == nil {
-//		/* Start the TMSP server */
-//		runTMSPServer()
-//	}
+	/* Run a tendermint Node */
 
-	if RPCClient == nil {
-		/* Start the RPC client */
-		runRPCClient()
-	}
+	config := tmcfg.GetConfig(fmt.Sprintf(".tendermint/node_%v", c.ID))
+	config.Set("node_id", c.ID)
+	config.Set("node_laddr", fmt.Sprintf("tcp://0.0.0.0:%v", 46659 + c.ID))
+	config.Set("rpc_laddr", fmt.Sprintf("tcp://0.0.0.0:%v", 46675 + c.ID))
+	config.Set("proxy_app", "nilapp")
 
-	n := newNode()
+	init_tm_files(config)
+	go tmnode.RunNode(config)
+
+	time.Sleep(5*time.Second)
+
+	/* Create a raft2tmsp Node */
+	n := newNode(config)
 	n.logger = c.Logger
 	//go n.run()
 	return &n
@@ -144,9 +162,11 @@ type node struct {
 	status     chan chan raft.Status
 
 	logger raft.Logger
+
+	tmrpcclient *rpcclient.ClientURI
 }
 
-func newNode() node {
+func newNode(c cfg.Config) node {
 	return node{
 		propc:      make(chan pb.Message),
 		recvc:      make(chan pb.Message),
@@ -161,6 +181,7 @@ func newNode() node {
 		done:   make(chan struct{}),
 		stop:   make(chan struct{}),
 		status: make(chan chan raft.Status),
+		tmrpcclient: rpcclient.NewClientURI(c.GetString("rpc_laddr")),
 	}
 }
 
@@ -322,7 +343,7 @@ func (n *node) Propose(ctx context.Context, data []byte) error {
 	var r core_types.TMResult
 	var res *core_types.ResultBroadcastTx
 	var err error
-	_, err = RPCClient.Call("broadcast_tx_commit", []interface{}{data}, &r)
+	_, err = n.tmrpcclient.Call("broadcast_tx_commit", map[string]interface{}{"tx": data}, &r)
 
 	if r != nil {
 		res = r.(*core_types.ResultBroadcastTx)
