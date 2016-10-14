@@ -15,20 +15,26 @@
 package raft2tmsp
 
 import (
+	//"math/big"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"os"
+	//"crypto/rand"
 	"strings"
 	"time"
 
 	"github.com/coreos/etcd/raft"
 	pb "github.com/coreos/etcd/raft/raftpb"
 
-	rpcclient "github.com/tendermint/go-rpc/client"
 	cfg "github.com/tendermint/go-config"
-	tmnode "github.com/tendermint/tendermint/node"
+	rpcclient "github.com/tendermint/go-rpc/client"
+
 	tmcfg "github.com/tendermint/tendermint/config/tendermint"
+	tmnode "github.com/tendermint/tendermint/node"
 	"github.com/tendermint/tendermint/rpc/core/types"
 	tmtypes "github.com/tendermint/tendermint/types"
+
 	"github.com/tendermint/tmsp/types"
 
 	"golang.org/x/net/context"
@@ -55,6 +61,30 @@ func init_tm_files(c cfg.Config) {
 	}}
 
 	genDoc.SaveAs(c.GetString("genesis_file"))
+}
+
+// NOTE: this is totally unsafe.
+// it's only suitable for testnets.
+func reset_all(config cfg.Config) {
+	reset_priv_validator(config)
+	os.RemoveAll(config.GetString("db_dir"))
+	os.Remove(config.GetString("cswal"))
+}
+
+// NOTE: this is totally unsafe.
+// it's only suitable for testnets.
+func reset_priv_validator(config cfg.Config) {
+	// Get PrivValidator
+	var privValidator *tmtypes.PrivValidator
+	privValidatorFile := config.GetString("priv_validator_file")
+	if _, err := os.Stat(privValidatorFile); err == nil {
+		privValidator = tmtypes.LoadPrivValidator(privValidatorFile)
+		privValidator.Reset()
+	} else {
+		privValidator = tmtypes.GenPrivValidator()
+		privValidator.SetFile(privValidatorFile)
+		privValidator.Save()
+	}
 }
 
 // StartNode returns a new Node given configuration and a list of raft peers.
@@ -96,9 +126,9 @@ func StartNode(c *raft.Config, peers []raft.Peer) raft.Node {
 
 	config := tmcfg.GetConfig(fmt.Sprintf(".tendermint/node_%v", c.ID))
 	config.Set("node_id", c.ID)
-	config.Set("node_laddr", fmt.Sprintf("tcp://0.0.0.0:%v", 46655 + c.ID))
+	config.Set("node_laddr", fmt.Sprintf("tcp://0.0.0.0:%v", 46659 + c.ID))
 	config.Set("rpc_laddr", fmt.Sprintf("tcp://0.0.0.0:%v", 46675 + c.ID))
-	config.Set("proxy_app", "nilapp")
+	config.Set("proxy_app", "tcp://0.0.0.0:46658")
 
 	seeds := []string{}
 	for _, peer := range peers {
@@ -108,6 +138,7 @@ func StartNode(c *raft.Config, peers []raft.Peer) raft.Node {
 	}
 	config.Set("seeds", strings.Join(seeds, ","))
 
+	reset_all(config)
 	init_tm_files(config)
 	go tmnode.RunNode(config)
 
@@ -134,7 +165,7 @@ func RestartNode(c *raft.Config) raft.Node {
 	config.Set("node_id", c.ID)
 	config.Set("node_laddr", fmt.Sprintf("tcp://0.0.0.0:%v", 46659 + c.ID))
 	config.Set("rpc_laddr", fmt.Sprintf("tcp://0.0.0.0:%v", 46675 + c.ID))
-	config.Set("proxy_app", "nilapp")
+	config.Set("proxy_app", "tcp://0.0.0.0:46658")
 
 	init_tm_files(config)
 	go tmnode.RunNode(config)
@@ -186,6 +217,8 @@ func newNode(c cfg.Config) node {
 }
 
 func (n *node) Stop() {
+	os.Exit(0)
+	/*
 	select {
 	case n.stop <- struct{}{}:
 		// Not already stopped, so trigger it
@@ -195,6 +228,7 @@ func (n *node) Stop() {
 	}
 	// Block until the stop has been acknowledged by run()
 	<-n.done
+	*/
 }
 
 func (n *node) run() {
@@ -343,20 +377,29 @@ func (n *node) Propose(ctx context.Context, data []byte) error {
 	var r core_types.TMResult
 	var res *core_types.ResultBroadcastTx
 	var err error
+
+	/*
+	rnd, _ := rand.Int(rand.Reader, big.NewInt(256))
+	for _, b := range rnd.Bytes() {
+		data = append(data, b)
+	}
+	*/
 	_, err = n.tmrpcclient.Call("broadcast_tx_commit", map[string]interface{}{"tx": data}, &r)
 
 	if r != nil {
 		res = r.(*core_types.ResultBroadcastTx)
-		print("code "+res.Code.String()+" data "+string(res.Data)+"\n\n")
 		if res.Code == types.CodeType_OK {
+			fmt.Printf("BroadcastTxCommit result %v\n\n", res.Data)
+			index := binary.BigEndian.Uint64(res.Data[:8])
+			d := res.Data[8:]
+			fmt.Printf("BroadcastTxCommit result %v data %v index %v\n\n", res.Code, d, index)
 			n.readyc <- raft.Ready{
 				Entries:          []pb.Entry{},
-				CommittedEntries: []pb.Entry{{Data: res.Data, Type: pb.EntryNormal}},
+				CommittedEntries: []pb.Entry{{Data: d, Type: pb.EntryNormal, Index:index}},
 				Messages:         []pb.Message{},
 			}
 		}
 	} else {
-		print(err.Error()+"\n")
 		return err
 	}
 	return nil
