@@ -147,7 +147,7 @@ func StartNode(c *raft.Config, peers []raft.Peer) raft.Node {
 	/* Create a raft2tmsp Node */
 	n := newNode(config)
 	n.logger = c.Logger
-	//go n.run()
+	go n.run()
 	return &n
 }
 
@@ -175,7 +175,7 @@ func RestartNode(c *raft.Config) raft.Node {
 	/* Create a raft2tmsp Node */
 	n := newNode(config)
 	n.logger = c.Logger
-	//go n.run()
+	go n.run()
 	return &n
 }
 
@@ -232,33 +232,38 @@ func (n *node) Stop() {
 }
 
 func (n *node) run() {
-	/*
 	var propc chan pb.Message
-	var readyc chan Ready
+	var readyc chan raft.Ready
 	var advancec chan struct{}
-	var prevLastUnstablei, prevLastUnstablet uint64
-	var havePrevLastUnstablei bool
-	var prevSnapi uint64
-	var rd Ready
+	//var prevLastUnstablei, prevLastUnstablet uint64
+	//var havePrevLastUnstablei bool
+	//var prevSnapi uint64
+	var rd raft.Ready
 
-	lead := None
-	prevSoftSt := r.softState()
-	prevHardSt := emptyState
-	*/
+	//lead := raft.None
+	//prevSoftSt := r.softState()
+	//prevHardSt := emptyState
 
 	for {
-		/*
 		if advancec != nil {
 			readyc = nil
 		} else {
+			if len(rd.CommittedEntries) != 0 {
+				readyc = n.readyc
+			} else {
+				readyc = nil
+			}
+			/*
 			rd = newReady(r, prevSoftSt, prevHardSt)
 			if rd.containsUpdates() {
 				readyc = n.readyc
 			} else {
 				readyc = nil
 			}
+			*/
 		}
 
+		/*
 		if lead != r.lead {
 			if r.hasLeader() {
 				if lead == None {
@@ -266,7 +271,6 @@ func (n *node) run() {
 				} else {
 					r.logger.Infof("raft.node: %x changed leader from %x to %x at term %d", r.id, lead, r.lead, r.Term)
 				}
-				propc = n.propc
 			} else {
 				r.logger.Infof("raft.node: %x lost leader %x at term %d", r.id, lead, r.Term)
 				propc = nil
@@ -274,19 +278,52 @@ func (n *node) run() {
 			lead = r.lead
 		}
 		*/
+		propc = n.propc
+
 		select {
 		// TODO: maybe buffer the config propose if there exists one (the way
 		// described in raft dissertation)
 		// Currently it is dropped in Step silently.
-		/*
-		case m := <-n.propc:
+
+		case m := <-propc:
+			var r core_types.TMResult
+			var res *core_types.ResultBroadcastTx
+			var err error
+
+			/*
+			rnd, _ := rand.Int(rand.Reader, big.NewInt(256))
+			for _, b := range rnd.Bytes() {
+				data = append(data, b)
+			}
+			*/
+
+			data := m.Entries[0].Data
+			_, err = n.tmrpcclient.Call("broadcast_tx_commit", map[string]interface{}{"tx": data}, &r)
+
+			if r != nil {
+				res = r.(*core_types.ResultBroadcastTx)
+				if res.Code == types.CodeType_OK {
+					index := binary.BigEndian.Uint64(res.Data[:8])
+					d := res.Data[8:]
+					rd.CommittedEntries = append(rd.CommittedEntries,
+						pb.Entry{Data: d, Type: pb.EntryNormal, Index:index})
+				}
+			} else {
+				n.logger.Error(err)
+			}
+
+			/*
 			m.From = r.id
 			r.Step(m)
+			*/
+		/*
 		case m := <-n.recvc:
-			// filter out response message from unknown From.
+		// filter out response message from unknown From.
 			if _, ok := r.prs[m.From]; ok || !IsResponseMsg(m.Type) {
 				r.Step(m) // raft never returns an error
 			}
+		*/
+		/*
 		case cc := <-n.confc:
 			if cc.NodeID == None {
 				r.resetPendingConf()
@@ -311,14 +348,15 @@ func (n *node) run() {
 			default:
 				panic("unexpected conf type")
 			}
-			select {
-			case n.confstatec <- pb.ConfState{Nodes: r.nodes()}:
-			case <-n.done:
-			}
-
+				select {
+				case n.confstatec <- pb.ConfState{Nodes: r.nodes()}:
+				case <-n.done:
+				}
+		*/
 		case <-n.tickc:
 
 		case readyc <- rd:
+			/*
 			if rd.SoftState != nil {
 				prevSoftSt = rd.SoftState
 			}
@@ -337,8 +375,11 @@ func (n *node) run() {
 			r.msgs = nil
 			r.readState.Index = None
 			r.readState.RequestCtx = nil
+			*/
+			rd = raft.Ready{}
 			advancec = n.advancec
 		case <-advancec:
+			/*
 			if prevHardSt.Commit != 0 {
 				r.raftLog.appliedTo(prevHardSt.Commit)
 			}
@@ -347,13 +388,15 @@ func (n *node) run() {
 				havePrevLastUnstablei = false
 			}
 			r.raftLog.stableSnapTo(prevSnapi)
+			*/
 			advancec = nil
+		/*
 		case c := <-n.status:
 			c <- getStatus(r)
+		*/
 		case <-n.stop:
 			close(n.done)
 			return
-		*/
 		}
 	}
 }
@@ -361,48 +404,18 @@ func (n *node) run() {
 // Tick increments the internal logical clock for this Node. Election timeouts
 // and heartbeat timeouts are in units of ticks.
 func (n *node) Tick() {
-	/*
 	select {
 	case n.tickc <- struct{}{}:
 	case <-n.done:
 	default:
 		n.logger.Warningf("A tick missed to fire. Node blocks too long!")
 	}
-	*/
 }
 
 func (n *node) Campaign(ctx context.Context) error { return nil /*return n.step(ctx, pb.Message{Type: pb.MsgHup}) */}
 
 func (n *node) Propose(ctx context.Context, data []byte) error {
-	var r core_types.TMResult
-	var res *core_types.ResultBroadcastTx
-	var err error
-
-	/*
-	rnd, _ := rand.Int(rand.Reader, big.NewInt(256))
-	for _, b := range rnd.Bytes() {
-		data = append(data, b)
-	}
-	*/
-	_, err = n.tmrpcclient.Call("broadcast_tx_commit", map[string]interface{}{"tx": data}, &r)
-
-	if r != nil {
-		res = r.(*core_types.ResultBroadcastTx)
-		if res.Code == types.CodeType_OK {
-			fmt.Printf("BroadcastTxCommit result %v\n\n", res.Data)
-			index := binary.BigEndian.Uint64(res.Data[:8])
-			d := res.Data[8:]
-			fmt.Printf("BroadcastTxCommit result %v data %v index %v\n\n", res.Code, d, index)
-			n.readyc <- raft.Ready{
-				Entries:          []pb.Entry{},
-				CommittedEntries: []pb.Entry{{Data: d, Type: pb.EntryNormal, Index:index}},
-				Messages:         []pb.Message{},
-			}
-		}
-	} else {
-		return err
-	}
-	return nil
+	return n.step(ctx, pb.Message{Type: pb.MsgProp, Entries: []pb.Entry{{Data: data}}})
 }
 
 func (n *node) Step(ctx context.Context, m pb.Message) error {
