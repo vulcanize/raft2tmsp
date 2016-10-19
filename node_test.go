@@ -398,9 +398,9 @@ func TestNodeStart(t *testing.T) {
 			},
 		},
 		{
-			HardState:        raftpb.HardState{Term: 2, Commit: 3, Vote: 1},
-			Entries:          []raftpb.Entry{{Term: 2, Index: 3, Data: []byte("foo")}},
-			CommittedEntries: []raftpb.Entry{{Term: 2, Index: 3, Data: []byte("foo")}},
+			//HardState:        raftpb.HardState{Term: 2, Commit: 3, Vote: 1},
+			Entries:          []raftpb.Entry{{Term: 2, Index: 1, Data: []byte("foo")}},
+			CommittedEntries: []raftpb.Entry{{Term: 2, Index: 1, Data: []byte("foo")}},
 		},
 	}
 	storage := raft.NewMemoryStorage()
@@ -412,13 +412,10 @@ func TestNodeStart(t *testing.T) {
 		MaxSizePerMsg:   noLimit,
 		MaxInflightMsgs: 256,
 	}
-	print("Before starting\n\n\n\n\n\n")
 	n := StartNode(c, []raft.Peer{{ID: 1}})
 	defer n.Stop()
-	print("After starting\n\n\n\n\n\n")
 	/*
 	g := <-n.Ready()
-	print("Ready 1\n\n\n\n\n\n")
 	if !reflect.DeepEqual(g, wants[0]) {
 		t.Fatalf("#%d: g = %+v,\n             w   %+v", 1, g, wants[0])
 	} else {
@@ -428,20 +425,17 @@ func TestNodeStart(t *testing.T) {
 	*/
 
 	n.Campaign(ctx)
-	print("Campaign\n\n\n\n\n\n")
 	//rd := <-n.Ready()
 	//storage.Append(rd.Entries)
 	//n.Advance()
 
 	n.Propose(ctx, []byte("foo"))
-	print("Propose\n\n\n\n\n\n")
 	if g2 := <-n.Ready(); !reflect.DeepEqual(g2, wants[1]) {
-		fmt.Printf("#%d: g = %+v,\n             w   %+v", 2, g2, wants[1])
 		t.Errorf("#%d: g = %+v,\n             w   %+v", 2, g2, wants[1])
+		fmt.Printf("#%d: g = %+v,\n             w   %+v", 2, g2, wants[1])
 	} else {
 		storage.Append(g2.Entries)
 		n.Advance()
-		print("Advance\n\n\n\n\n\n")
 	}
 
 	select {

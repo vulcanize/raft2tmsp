@@ -15,12 +15,9 @@
 package raft2tmsp
 
 import (
-	//"math/big"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
-	//"crypto/rand"
 	"strings"
 	"time"
 
@@ -28,14 +25,13 @@ import (
 	pb "github.com/coreos/etcd/raft/raftpb"
 
 	cfg "github.com/tendermint/go-config"
+	//"github.com/tendermint/go-logger"
 	rpcclient "github.com/tendermint/go-rpc/client"
 
 	tmcfg "github.com/tendermint/tendermint/config/tendermint"
 	tmnode "github.com/tendermint/tendermint/node"
 	"github.com/tendermint/tendermint/rpc/core/types"
 	tmtypes "github.com/tendermint/tendermint/types"
-
-	"github.com/tendermint/tmsp/types"
 
 	"golang.org/x/net/context"
 )
@@ -128,7 +124,7 @@ func StartNode(c *raft.Config, peers []raft.Peer) raft.Node {
 	config.Set("node_id", c.ID)
 	config.Set("node_laddr", fmt.Sprintf("tcp://0.0.0.0:%v", 46659 + c.ID))
 	config.Set("rpc_laddr", fmt.Sprintf("tcp://0.0.0.0:%v", 46675 + c.ID))
-	config.Set("proxy_app", "tcp://0.0.0.0:46658")
+	config.Set("proxy_app", "nilapp")
 
 	seeds := []string{}
 	for _, peer := range peers {
@@ -165,7 +161,7 @@ func RestartNode(c *raft.Config) raft.Node {
 	config.Set("node_id", c.ID)
 	config.Set("node_laddr", fmt.Sprintf("tcp://0.0.0.0:%v", 46659 + c.ID))
 	config.Set("rpc_laddr", fmt.Sprintf("tcp://0.0.0.0:%v", 46675 + c.ID))
-	config.Set("proxy_app", "tcp://0.0.0.0:46658")
+	config.Set("proxy_app", "nilapp")
 
 	init_tm_files(config)
 	go tmnode.RunNode(config)
@@ -232,97 +228,77 @@ func (n *node) Stop() {
 }
 
 func (n *node) run() {
+	//logger.SetLogLevel("error")
+
 	var propc chan pb.Message
 	var readyc chan raft.Ready
-	var advancec chan struct{}
-	//var prevLastUnstablei, prevLastUnstablet uint64
-	//var havePrevLastUnstablei bool
-	//var prevSnapi uint64
 	var rd raft.Ready
+	var advancec chan struct{}
+	var prevSoftSt *raft.SoftState
+	prevHardSt := emptyState
+	prevTerm := uint64(1)
 
-	//lead := raft.None
-	//prevSoftSt := r.softState()
-	//prevHardSt := emptyState
+	var lastHeight int
+	var lastIndex uint64
 
 	for {
 		if advancec != nil {
 			readyc = nil
-		} else {
-			if len(rd.CommittedEntries) != 0 {
-				readyc = n.readyc
-			} else {
-				readyc = nil
-			}
-			/*
-			rd = newReady(r, prevSoftSt, prevHardSt)
-			if rd.containsUpdates() {
-				readyc = n.readyc
-			} else {
-				readyc = nil
-			}
-			*/
-		}
+		} else if len(rd.Entries) == 0 {
+			var r core_types.TMResult
 
-		/*
-		if lead != r.lead {
-			if r.hasLeader() {
-				if lead == None {
-					r.logger.Infof("raft.node: %x elected leader %x at term %d", r.id, r.lead, r.Term)
+			_, _ = n.tmrpcclient.Call("block", map[string]interface{}{"height": lastHeight + 1}, &r)
+
+			if r != nil {
+				lastHeight++
+				res := r.(*core_types.ResultBlock)
+				tx_num := res.BlockMeta.Header.NumTxs
+
+				if tx_num > 0 {
+					rd = raft.Ready{}
+					rd.SoftState = prevSoftSt
+					rd.HardState = prevHardSt
+					for i, tx := range res.Block.Data.Txs {
+						entry := pb.Entry{Data: tx, Type: pb.EntryNormal, Index: lastIndex + uint64(i+1),
+							Term: prevTerm}
+						rd.Entries = append(rd.Entries, entry)
+						rd.CommittedEntries = append(rd.CommittedEntries, entry)
+					}
+					lastIndex += uint64(res.BlockMeta.Header.NumTxs)
+
+					readyc = n.readyc
 				} else {
-					r.logger.Infof("raft.node: %x changed leader from %x to %x at term %d", r.id, lead, r.lead, r.Term)
+					readyc = nil
 				}
 			} else {
-				r.logger.Infof("raft.node: %x lost leader %x at term %d", r.id, lead, r.Term)
-				propc = nil
+				readyc = nil
 			}
-			lead = r.lead
 		}
-		*/
+
 		propc = n.propc
 
 		select {
-		// TODO: maybe buffer the config propose if there exists one (the way
-		// described in raft dissertation)
-		// Currently it is dropped in Step silently.
-
 		case m := <-propc:
-			var r core_types.TMResult
-			var res *core_types.ResultBroadcastTx
-			var err error
-
 			/*
 			rnd, _ := rand.Int(rand.Reader, big.NewInt(256))
 			for _, b := range rnd.Bytes() {
 				data = append(data, b)
 			}
 			*/
+			var r core_types.TMResult
 
 			data := m.Entries[0].Data
-			_, err = n.tmrpcclient.Call("broadcast_tx_commit", map[string]interface{}{"tx": data}, &r)
+			_, err := n.tmrpcclient.Call("broadcast_tx_commit", map[string]interface{}{"tx": data}, &r)
 
-			if r != nil {
-				res = r.(*core_types.ResultBroadcastTx)
-				if res.Code == types.CodeType_OK {
-					index := binary.BigEndian.Uint64(res.Data[:8])
-					d := res.Data[8:]
-					rd.CommittedEntries = append(rd.CommittedEntries,
-						pb.Entry{Data: d, Type: pb.EntryNormal, Index:index})
-				}
-			} else {
+			if err != nil {
 				n.logger.Error(err)
 			}
 
-			/*
-			m.From = r.id
-			r.Step(m)
-			*/
-		/*
 		case m := <-n.recvc:
-		// filter out response message from unknown From.
-			if _, ok := r.prs[m.From]; ok || !IsResponseMsg(m.Type) {
-				r.Step(m) // raft never returns an error
+			if m.Type == pb.MsgHup {
+				prevTerm++
 			}
-		*/
+
 		/*
 		case cc := <-n.confc:
 			if cc.NodeID == None {
@@ -356,26 +332,6 @@ func (n *node) run() {
 		case <-n.tickc:
 
 		case readyc <- rd:
-			/*
-			if rd.SoftState != nil {
-				prevSoftSt = rd.SoftState
-			}
-			if len(rd.Entries) > 0 {
-				prevLastUnstablei = rd.Entries[len(rd.Entries)-1].Index
-				prevLastUnstablet = rd.Entries[len(rd.Entries)-1].Term
-				havePrevLastUnstablei = true
-			}
-			if !IsEmptyHardState(rd.HardState) {
-				prevHardSt = rd.HardState
-			}
-			if !IsEmptySnap(rd.Snapshot) {
-				prevSnapi = rd.Snapshot.Metadata.Index
-			}
-
-			r.msgs = nil
-			r.readState.Index = None
-			r.readState.RequestCtx = nil
-			*/
 			rd = raft.Ready{}
 			advancec = n.advancec
 		case <-advancec:
@@ -397,6 +353,9 @@ func (n *node) run() {
 		case <-n.stop:
 			close(n.done)
 			return
+
+		default:
+
 		}
 	}
 }
@@ -412,7 +371,7 @@ func (n *node) Tick() {
 	}
 }
 
-func (n *node) Campaign(ctx context.Context) error { return nil /*return n.step(ctx, pb.Message{Type: pb.MsgHup}) */}
+func (n *node) Campaign(ctx context.Context) error { return n.step(ctx, pb.Message{Type: pb.MsgHup}) }
 
 func (n *node) Propose(ctx context.Context, data []byte) error {
 	return n.step(ctx, pb.Message{Type: pb.MsgProp, Entries: []pb.Entry{{Data: data}}})
@@ -459,12 +418,10 @@ func (n *node) step(ctx context.Context, m pb.Message) error {
 func (n *node) Ready() <-chan raft.Ready { return n.readyc }
 
 func (n *node) Advance() {
-	/*
 	select {
 	case n.advancec <- struct{}{}:
 	case <-n.done:
 	}
-	*/
 }
 
 func (n *node) ApplyConfChange(cc pb.ConfChange) *pb.ConfState {
