@@ -17,6 +17,8 @@ package raft2tmsp
 import (
 	"errors"
 	"fmt"
+	"io/ioutil"
+	"net"
 	"os"
 	"strings"
 	"time"
@@ -24,8 +26,10 @@ import (
 	"github.com/coreos/etcd/raft"
 	pb "github.com/coreos/etcd/raft/raftpb"
 
+	. "github.com/tendermint/go-common"
 	cfg "github.com/tendermint/go-config"
 	//"github.com/tendermint/go-logger"
+	"github.com/tendermint/go-p2p"
 	rpcclient "github.com/tendermint/go-rpc/client"
 
 	tmcfg "github.com/tendermint/tendermint/config/tendermint"
@@ -83,96 +87,63 @@ func reset_priv_validator(config cfg.Config) {
 	}
 }
 
-// StartNode returns a new Node given configuration and a list of raft peers.
-// It appends a ConfChangeAddNode entry for each given peer to the initial log.
-func StartNode(c *raft.Config, peers []raft.Peer) raft.Node {
-	/*
-	r := newRaft(c)
-	// become the follower at term 1 and apply initial configuration
-	// entries of term 1
-	r.becomeFollower(1, None)
-	for _, peer := range peers {
-		cc := pb.ConfChange{Type: pb.ConfChangeAddNode, NodeID: peer.ID, Context: peer.Context}
-		d, err := cc.Marshal()
-		if err != nil {
-			panic("unexpected marshal error")
-		}
-		e := pb.Entry{Type: pb.EntryConfChange, Term: 1, Index: r.raftLog.lastIndex() + 1, Data: d}
-		r.raftLog.append(e)
-	}
-	// Mark these initial entries as committed.
-	// TODO(bdarnell): These entries are still unstable; do we need to preserve
-	// the invariant that committed < unstable?
-	r.raftLog.committed = r.raftLog.lastIndex()
-	// Now apply them, mainly so that the application can call Campaign
-	// immediately after StartNode in tests. Note that these nodes will
-	// be added to raft twice: here and when the application's Ready
-	// loop calls ApplyConfChange. The calls to addNode must come after
-	// all calls to raftLog.append so progress.next is set after these
-	// bootstrapping entries (it is an error if we try to append these
-	// entries since they have already been committed).
-	// We do not set raftLog.applied so the application will be able
-	// to observe all conf changes via Ready.CommittedEntries.
-	for _, peer := range peers {
-		r.addNode(peer.ID)
-	}
-	*/
-
-	/* Run a tendermint Node */
-
-	config := tmcfg.GetConfig(fmt.Sprintf(".tendermint/node_%v", c.ID))
-	config.Set("node_id", c.ID)
-	config.Set("node_laddr", fmt.Sprintf("tcp://0.0.0.0:%v", 46659 + c.ID))
-	config.Set("rpc_laddr", fmt.Sprintf("tcp://0.0.0.0:%v", 46675 + c.ID))
-	config.Set("proxy_app", "nilapp")
-
-	seeds := []string{}
-	for _, peer := range peers {
-		if peer.ID != c.ID {
-			seeds = append(seeds, fmt.Sprintf("0.0.0.0:%v", 46655 + peer.ID))
-		}
-	}
-	config.Set("seeds", strings.Join(seeds, ","))
-
-	reset_all(config)
-	init_tm_files(config)
-	go tmnode.RunNode(config)
-
-	time.Sleep(5*time.Second)
-
-	/* Create a raft2tmsp Node */
-	n := newNode(config)
-	n.logger = c.Logger
-	go n.run()
-	return &n
+func containsUpdates(rd raft.Ready) bool {
+	return rd.SoftState != nil || !raft.IsEmptyHardState(rd.HardState) ||
+		!raft.IsEmptySnap(rd.Snapshot) || len(rd.Entries) > 0 ||
+		len(rd.CommittedEntries) > 0 || len(rd.Messages) > 0 || rd.Index != raft.None
 }
 
-// RestartNode is similar to StartNode but does not take a list of peers.
-// The current membership of the cluster will be restored from the Storage.
-// If the caller has an existing state machine, pass in the last log index that
-// has been applied to it; otherwise use zero.
-func RestartNode(c *raft.Config) raft.Node {
+func RunTMNode(config cfg.Config) (*tmnode.Node, net.Listener) {
+	// Wait until the genesis doc becomes available
+	genDocFile := config.GetString("genesis_file")
+	if !FileExists(genDocFile) {
+		//log.Notice(Fmt("Waiting for genesis file %v...", genDocFile))
+		for {
+			time.Sleep(time.Second)
+			if !FileExists(genDocFile) {
+				continue
+			}
+			jsonBlob, err := ioutil.ReadFile(genDocFile)
+			if err != nil {
+				Exit(Fmt("Couldn't read GenesisDoc file: %v", err))
+			}
+			genDoc := tmtypes.GenesisDocFromJSON(jsonBlob)
+			if genDoc.ChainID == "" {
+				PanicSanity(Fmt("Genesis doc %v must include non-empty chain_id", genDocFile))
+			}
+			config.Set("chain_id", genDoc.ChainID)
+		}
+	}
 
-	//r := newRaft(c)
+	// Create & start node
+	n := tmnode.NewNodeDefault(config)
 
-	/* Run a tendermint Node */
+	protocol, address := tmnode.ProtocolAndAddress(config.GetString("node_laddr"))
+	l := p2p.NewDefaultListener(protocol, address, config.GetBool("skip_upnp"))
+	n.AddListener(l)
+	err := n.Start()
+	if err != nil {
+		Exit(Fmt("Failed to start node: %v", err))
+	}
 
-	config := tmcfg.GetConfig(fmt.Sprintf(".tendermint/node_%v", c.ID))
-	config.Set("node_id", c.ID)
-	config.Set("node_laddr", fmt.Sprintf("tcp://0.0.0.0:%v", 46659 + c.ID))
-	config.Set("rpc_laddr", fmt.Sprintf("tcp://0.0.0.0:%v", 46675 + c.ID))
-	config.Set("proxy_app", "nilapp")
+	//log.Notice("Started node", "nodeInfo", n.sw.NodeInfo())
 
-	init_tm_files(config)
-	go tmnode.RunNode(config)
+	// If seedNode is provided by config, dial out.
+	if config.GetString("seeds") != "" {
+		seeds := strings.Split(config.GetString("seeds"), ",")
+		n.DialSeeds(seeds)
+	}
 
-	time.Sleep(5*time.Second)
+	// Run the RPC server.
+	var rpcl []net.Listener
+	if config.GetString("rpc_laddr") != "" {
+		rpcl, err = n.StartRPC()
+		if err != nil {
+			PanicCrisis(err)
+		}
+	}
 
-	/* Create a raft2tmsp Node */
-	n := newNode(config)
-	n.logger = c.Logger
-	go n.run()
-	return &n
+	return n, rpcl[0]
 }
 
 // node is the canonical implementation of the Node interface
@@ -191,6 +162,9 @@ type node struct {
 	logger raft.Logger
 
 	tmrpcclient *rpcclient.ClientURI
+
+	tnode *tmnode.Node
+	httprpcl net.Listener
 }
 
 func newNode(c cfg.Config) node {
@@ -212,37 +186,22 @@ func newNode(c cfg.Config) node {
 	}
 }
 
-func (n *node) Stop() {
-	os.Exit(0)
-	/*
-	select {
-	case n.stop <- struct{}{}:
-		// Not already stopped, so trigger it
-	case <-n.done:
-		// Node has already been stopped - no need to do anything
-		return
-	}
-	// Block until the stop has been acknowledged by run()
-	<-n.done
-	*/
-}
-
-func (n *node) run() {
+func (n *node) run(index uint64, initRD raft.Ready) {
 	//logger.SetLogLevel("error")
 
 	var propc chan pb.Message
 	var readyc chan raft.Ready
-	var rd raft.Ready
+	var rd raft.Ready = initRD
 	var advancec chan struct{}
 	var prevSoftSt *raft.SoftState
 	prevHardSt := emptyState
 	prevTerm := uint64(1)
 
 	var lastHeight int
-	var lastIndex uint64
+	var lastIndex uint64 = index
 
 	for {
-		if advancec != nil {
+		if advancec != nil && !containsUpdates(rd) {
 			readyc = nil
 		} else if len(rd.Entries) == 0 {
 			var r core_types.TMResult
@@ -273,18 +232,20 @@ func (n *node) run() {
 			} else {
 				readyc = nil
 			}
+		} else {
+			readyc = n.readyc
 		}
 
 		propc = n.propc
 
 		select {
 		case m := <-propc:
-			/*
-			rnd, _ := rand.Int(rand.Reader, big.NewInt(256))
-			for _, b := range rnd.Bytes() {
-				data = append(data, b)
-			}
-			*/
+		/*
+		rnd, _ := rand.Int(rand.Reader, big.NewInt(256))
+		for _, b := range rnd.Bytes() {
+			data = append(data, b)
+		}
+		*/
 			var r core_types.TMResult
 
 			data := m.Entries[0].Data
@@ -335,22 +296,24 @@ func (n *node) run() {
 			rd = raft.Ready{}
 			advancec = n.advancec
 		case <-advancec:
-			/*
-			if prevHardSt.Commit != 0 {
-				r.raftLog.appliedTo(prevHardSt.Commit)
-			}
-			if havePrevLastUnstablei {
-				r.raftLog.stableTo(prevLastUnstablei, prevLastUnstablet)
-				havePrevLastUnstablei = false
-			}
-			r.raftLog.stableSnapTo(prevSnapi)
-			*/
+		/*
+		if prevHardSt.Commit != 0 {
+			r.raftLog.appliedTo(prevHardSt.Commit)
+		}
+		if havePrevLastUnstablei {
+			r.raftLog.stableTo(prevLastUnstablei, prevLastUnstablet)
+			havePrevLastUnstablei = false
+		}
+		r.raftLog.stableSnapTo(prevSnapi)
+		*/
 			advancec = nil
 		/*
 		case c := <-n.status:
 			c <- getStatus(r)
 		*/
 		case <-n.stop:
+			n.tnode.Stop()
+			n.httprpcl.Close()
 			close(n.done)
 			return
 
@@ -358,6 +321,91 @@ func (n *node) run() {
 
 		}
 	}
+}
+
+// StartNode returns a new Node given configuration and a list of raft peers.
+// It appends a ConfChangeAddNode entry for each given peer to the initial log.
+func StartNode(c *raft.Config, peers []raft.Peer) raft.Node {
+	/* Run a tendermint Node */
+
+	config := tmcfg.GetConfig(fmt.Sprintf(".tendermint/node_%v", c.ID))
+	config.Set("node_id", c.ID)
+	config.Set("node_laddr", fmt.Sprintf("tcp://0.0.0.0:%v", 46659 + c.ID))
+	config.Set("rpc_laddr", fmt.Sprintf("tcp://0.0.0.0:%v", 46675 + c.ID))
+	config.Set("proxy_app", "nilapp")
+
+	index := uint64(0)
+	confChangeEntries := []pb.Entry{}
+	seeds := []string{}
+	for _, peer := range peers {
+		cc := pb.ConfChange{Type: pb.ConfChangeAddNode, NodeID: peer.ID, Context: peer.Context}
+		d, err := cc.Marshal()
+		if err != nil {
+			panic("unexpected marshal error")
+		}
+		e := pb.Entry{Type: pb.EntryConfChange, Term: 1, Index: index + 1, Data: d}
+
+		confChangeEntries = append(confChangeEntries, e)
+		index++
+
+		if peer.ID != c.ID {
+			seeds = append(seeds, fmt.Sprintf("0.0.0.0:%v", 46655 + peer.ID))
+		}
+	}
+	config.Set("seeds", strings.Join(seeds, ","))
+
+	initRD := raft.Ready{Entries: confChangeEntries, CommittedEntries: confChangeEntries}
+
+	reset_all(config)
+	init_tm_files(config)
+
+	/* Create a raft2tmsp Node */
+	n := newNode(config)
+	n.logger = c.Logger
+	n.tnode, n.httprpcl = RunTMNode(config)
+
+	time.Sleep(5*time.Second)
+
+	go n.run(index, initRD)
+	return &n
+}
+
+// RestartNode is similar to StartNode but does not take a list of peers.
+// The current membership of the cluster will be restored from the Storage.
+// If the caller has an existing state machine, pass in the last log index that
+// has been applied to it; otherwise use zero.
+func RestartNode(c *raft.Config) raft.Node {
+	/* Run a tendermint Node */
+
+	config := tmcfg.GetConfig(fmt.Sprintf(".tendermint/node_%v", c.ID))
+	config.Set("node_id", c.ID)
+	config.Set("node_laddr", fmt.Sprintf("tcp://0.0.0.0:%v", 46659 + c.ID))
+	config.Set("rpc_laddr", fmt.Sprintf("tcp://0.0.0.0:%v", 46675 + c.ID))
+	config.Set("proxy_app", "nilapp")
+
+	init_tm_files(config)
+
+	/* Create a raft2tmsp Node */
+	n := newNode(config)
+	n.logger = c.Logger
+	n.tnode, n.httprpcl = RunTMNode(config)
+
+	time.Sleep(5*time.Second)
+
+	go n.run(1, raft.Ready{})
+	return &n
+}
+
+func (n *node) Stop() {
+	select {
+	case n.stop <- struct{}{}:
+		// Not already stopped, so trigger it
+	case <-n.done:
+		// Node has already been stopped - no need to do anything
+		return
+	}
+	// Block until the stop has been acknowledged by run()
+	<-n.done
 }
 
 // Tick increments the internal logical clock for this Node. Election timeouts

@@ -16,7 +16,7 @@ package raft2tmsp
 
 import (
 	//"bytes"
-	"fmt"
+	//"fmt"
 	"reflect"
 	"math"
 	"testing"
@@ -24,12 +24,14 @@ import (
 
 	//"github.com/coreos/etcd/pkg/testutil"
 	"github.com/coreos/etcd/raft/raftpb"
-	raft "github.com/coreos/etcd/raft"
+	"github.com/coreos/etcd/raft"
 
 	"github.com/tendermint/go-logger"
 
 	"golang.org/x/net/context"
 )
+
+const noLimit = math.MaxUint64
 
 // TestNodeStep ensures that node.Step sends msgProp to propc chan
 // and other kinds of messages to recvc chan.
@@ -107,250 +109,9 @@ func TestNodeStepUnblock(t *testing.T) {
 			default:
 			}
 		case <-time.After(1 * time.Second):
-			t.Fatalf("#%d: failed to unblock step", i)
+			t.Errorf("#%d: failed to unblock step", i)
 		}
 	}
-}
-/*
-// TestNodePropose ensures that node.Propose sends the given proposal to the underlying raft.
-func TestNodePropose(t *testing.T) {
-	msgs := []raftpb.Message{}
-	appendStep := func(r *raft, m raftpb.Message) {
-		msgs = append(msgs, m)
-	}
-
-	n := newNode()
-	s := NewMemoryStorage()
-	r := newTestRaft(1, []uint64{1}, 10, 1, s)
-	go n.run(r)
-	n.Campaign(context.TODO())
-	for {
-		rd := <-n.Ready()
-		s.Append(rd.Entries)
-		// change the step function to appendStep until this raft becomes leader
-		if rd.SoftState.Lead == r.id {
-			r.step = appendStep
-			n.Advance()
-			break
-		}
-		n.Advance()
-	}
-	n.Propose(context.TODO(), []byte("somedata"))
-	n.Stop()
-
-	if len(msgs) != 1 {
-		t.Fatalf("len(msgs) = %d, want %d", len(msgs), 1)
-	}
-	if msgs[0].Type != raftpb.MsgProp {
-		t.Errorf("msg type = %d, want %d", msgs[0].Type, raftpb.MsgProp)
-	}
-	if !bytes.Equal(msgs[0].Entries[0].Data, []byte("somedata")) {
-		t.Errorf("data = %v, want %v", msgs[0].Entries[0].Data, []byte("somedata"))
-	}
-}
-*/
-/*
-// TestNodeReadIndex ensures that node.ReadIndex sends the MsgReadIndex message to the underlying raft.
-// It also ensures that ReadState can be read out through ready chan.
-func TestNodeReadIndex(t *testing.T) {
-	msgs := []raftpb.Message{}
-	appendStep := func(r *raft, m raftpb.Message) {
-		msgs = append(msgs, m)
-	}
-	wreadIndex := uint64(1)
-	wrequestCtx := []byte("somedata")
-
-	n := newNode()
-	s := NewMemoryStorage()
-	r := newTestRaft(1, []uint64{1}, 10, 1, s)
-	r.readState.Index = wreadIndex
-	r.readState.RequestCtx = wrequestCtx
-	go n.run(r)
-	n.Campaign(context.TODO())
-	for {
-		rd := <-n.Ready()
-		if rd.Index != wreadIndex {
-			t.Errorf("ReadIndex = %d, want %d", rd.Index, wreadIndex)
-		}
-
-		if !bytes.Equal(rd.RequestCtx, wrequestCtx) {
-			t.Errorf("RequestCtx = %v, want %v", rd.RequestCtx, wrequestCtx)
-		}
-
-		s.Append(rd.Entries)
-
-		if rd.SoftState.Lead == r.id {
-			n.Advance()
-			break
-		}
-		n.Advance()
-	}
-
-	r.step = appendStep
-	wrequestCtx = []byte("somedata2")
-	n.ReadIndex(context.TODO(), wrequestCtx)
-	n.Stop()
-
-	if len(msgs) != 1 {
-		t.Fatalf("len(msgs) = %d, want %d", len(msgs), 1)
-	}
-	if msgs[0].Type != raftpb.MsgReadIndex {
-		t.Errorf("msg type = %d, want %d", msgs[0].Type, raftpb.MsgReadIndex)
-	}
-	if !bytes.Equal(msgs[0].Entries[0].Data, wrequestCtx) {
-		t.Errorf("data = %v, want %v", msgs[0].Entries[0].Data, wrequestCtx)
-	}
-}
-
-// TestNodeProposeConfig ensures that node.ProposeConfChange sends the given configuration proposal
-// to the underlying raft.
-func TestNodeProposeConfig(t *testing.T) {
-	msgs := []raftpb.Message{}
-	appendStep := func(r *raft, m raftpb.Message) {
-		msgs = append(msgs, m)
-	}
-
-	n := newNode()
-	s := NewMemoryStorage()
-	r := newTestRaft(1, []uint64{1}, 10, 1, s)
-	go n.run(r)
-	n.Campaign(context.TODO())
-	for {
-		rd := <-n.Ready()
-		s.Append(rd.Entries)
-		// change the step function to appendStep until this raft becomes leader
-		if rd.SoftState.Lead == r.id {
-			r.step = appendStep
-			n.Advance()
-			break
-		}
-		n.Advance()
-	}
-	cc := raftpb.ConfChange{Type: raftpb.ConfChangeAddNode, NodeID: 1}
-	ccdata, err := cc.Marshal()
-	if err != nil {
-		t.Fatal(err)
-	}
-	n.ProposeConfChange(context.TODO(), cc)
-	n.Stop()
-
-	if len(msgs) != 1 {
-		t.Fatalf("len(msgs) = %d, want %d", len(msgs), 1)
-	}
-	if msgs[0].Type != raftpb.MsgProp {
-		t.Errorf("msg type = %d, want %d", msgs[0].Type, raftpb.MsgProp)
-	}
-	if !bytes.Equal(msgs[0].Entries[0].Data, ccdata) {
-		t.Errorf("data = %v, want %v", msgs[0].Entries[0].Data, ccdata)
-	}
-}
-
-// TestBlockProposal ensures that node will block proposal when it does not
-// know who is the current leader; node will accept proposal when it knows
-// who is the current leader.
-func TestBlockProposal(t *testing.T) {
-	n := newNode()
-	r := newTestRaft(1, []uint64{1}, 10, 1, NewMemoryStorage())
-	go n.run(r)
-	defer n.Stop()
-
-	errc := make(chan error, 1)
-	go func() {
-		errc <- n.Propose(context.TODO(), []byte("somedata"))
-	}()
-
-	testutil.WaitSchedule()
-	select {
-	case err := <-errc:
-		t.Errorf("err = %v, want blocking", err)
-	default:
-	}
-
-	n.Campaign(context.TODO())
-	select {
-	case err := <-errc:
-		if err != nil {
-			t.Errorf("err = %v, want %v", err, nil)
-		}
-	case <-time.After(10 * time.Second):
-		t.Errorf("blocking proposal, want unblocking")
-	}
-}
-
-// TestNodeTick ensures that node.Tick() will increase the
-// elapsed of the underlying raft state machine.
-func TestNodeTick(t *testing.T) {
-	n := newNode()
-	s := NewMemoryStorage()
-	r := newTestRaft(1, []uint64{1}, 10, 1, s)
-	go n.run(r)
-	elapsed := r.electionElapsed
-	n.Tick()
-	testutil.WaitSchedule()
-	n.Stop()
-	if r.electionElapsed != elapsed+1 {
-		t.Errorf("elapsed = %d, want %d", r.electionElapsed, elapsed+1)
-	}
-}
-
-// TestNodeStop ensures that node.Stop() blocks until the node has stopped
-// processing, and that it is idempotent
-func TestNodeStop(t *testing.T) {
-	n := newNode()
-	s := NewMemoryStorage()
-	r := newTestRaft(1, []uint64{1}, 10, 1, s)
-	donec := make(chan struct{})
-
-	go func() {
-		n.run(r)
-		close(donec)
-	}()
-
-	elapsed := r.electionElapsed
-	n.Tick()
-	testutil.WaitSchedule()
-	n.Stop()
-
-	select {
-	case <-donec:
-	case <-time.After(time.Second):
-		t.Fatalf("timed out waiting for node to stop!")
-	}
-
-	if r.electionElapsed != elapsed+1 {
-		t.Errorf("elapsed = %d, want %d", r.electionElapsed, elapsed+1)
-	}
-	// Further ticks should have no effect, the node is stopped.
-	n.Tick()
-	if r.electionElapsed != elapsed+1 {
-		t.Errorf("elapsed = %d, want %d", r.electionElapsed, elapsed+1)
-	}
-	// Subsequent Stops should have no effect.
-	n.Stop()
-}
-*/
-
-const None uint64 = 0
-const noLimit = math.MaxUint64
-
-func isHardStateEqual(a, b raftpb.HardState) bool {
-	return a.Term == b.Term && a.Vote == b.Vote && a.Commit == b.Commit
-}
-
-// IsEmptyHardState returns true if the given HardState is empty.
-func IsEmptyHardState(st raftpb.HardState) bool {
-	return isHardStateEqual(st, emptyState)
-}
-
-// IsEmptySnap returns true if the given Snapshot is empty.
-func IsEmptySnap(sp raftpb.Snapshot) bool {
-	return sp.Metadata.Index == 0
-}
-
-func containsUpdates(rd raft.Ready) bool {
-	return rd.SoftState != nil || !IsEmptyHardState(rd.HardState) ||
-		!IsEmptySnap(rd.Snapshot) || len(rd.Entries) > 0 ||
-		len(rd.CommittedEntries) > 0 || len(rd.Messages) > 0 || rd.Index != None
 }
 
 func TestReadyContainUpdates(t *testing.T) {
@@ -385,11 +146,11 @@ func TestNodeStart(t *testing.T) {
 	cc := raftpb.ConfChange{Type: raftpb.ConfChangeAddNode, NodeID: 1}
 	ccdata, err := cc.Marshal()
 	if err != nil {
-		t.Fatalf("unexpected marshal error: %v", err)
+		t.Errorf("unexpected marshal error: %v", err)
 	}
 	wants := []raft.Ready{
 		{
-			HardState: raftpb.HardState{Term: 1, Commit: 1, Vote: 0},
+			//HardState: raftpb.HardState{Term: 1, Commit: 1, Vote: 0},
 			Entries: []raftpb.Entry{
 				{Type: raftpb.EntryConfChange, Term: 1, Index: 1, Data: ccdata},
 			},
@@ -399,8 +160,8 @@ func TestNodeStart(t *testing.T) {
 		},
 		{
 			//HardState:        raftpb.HardState{Term: 2, Commit: 3, Vote: 1},
-			Entries:          []raftpb.Entry{{Term: 2, Index: 1, Data: []byte("foo")}},
-			CommittedEntries: []raftpb.Entry{{Term: 2, Index: 1, Data: []byte("foo")}},
+			Entries:          []raftpb.Entry{{Term: 2, Index: 2, Data: []byte("foo")}},
+			CommittedEntries: []raftpb.Entry{{Term: 2, Index: 2, Data: []byte("foo")}},
 		},
 	}
 	storage := raft.NewMemoryStorage()
@@ -414,15 +175,14 @@ func TestNodeStart(t *testing.T) {
 	}
 	n := StartNode(c, []raft.Peer{{ID: 1}})
 	defer n.Stop()
-	/*
+
 	g := <-n.Ready()
 	if !reflect.DeepEqual(g, wants[0]) {
-		t.Fatalf("#%d: g = %+v,\n             w   %+v", 1, g, wants[0])
+		t.Errorf("#%d: g = %+v,\n             w   %+v", 1, g, wants[0])
 	} else {
 		storage.Append(g.Entries)
 		n.Advance()
 	}
-	*/
 
 	n.Campaign(ctx)
 	//rd := <-n.Ready()
@@ -432,7 +192,6 @@ func TestNodeStart(t *testing.T) {
 	n.Propose(ctx, []byte("foo"))
 	if g2 := <-n.Ready(); !reflect.DeepEqual(g2, wants[1]) {
 		t.Errorf("#%d: g = %+v,\n             w   %+v", 2, g2, wants[1])
-		fmt.Printf("#%d: g = %+v,\n             w   %+v", 2, g2, wants[1])
 	} else {
 		storage.Append(g2.Entries)
 		n.Advance()
@@ -554,7 +313,7 @@ func TestNodeAdvance(t *testing.T) {
 	n.Propose(ctx, []byte("foo"))
 	select {
 	case rd = <-n.Ready():
-		t.Fatalf("unexpected Ready before Advance: %+v", rd)
+		t.Errorf("unexpected Ready before Advance: %+v", rd)
 	case <-time.After(time.Millisecond):
 	}
 	storage.Append(rd.Entries)
