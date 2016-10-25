@@ -48,20 +48,20 @@ func TestNodeStep(t *testing.T) {
 			select {
 			case <-n.propc:
 			default:
-				t.Errorf("%d: cannot receive %s on propc chan", msgt, msgn)
+				t.Fatalf("%d: cannot receive %s on propc chan", msgt, msgn)
 			}
 		} else {
 			if raft.IsLocalMsg(msgt) {
 				select {
 				case <-n.recvc:
-					t.Errorf("%d: step should ignore %s", msgt, msgn)
+					t.Fatalf("%d: step should ignore %s", msgt, msgn)
 				default:
 				}
 			} else {
 				select {
 				case <-n.recvc:
 				default:
-					t.Errorf("%d: cannot receive %s on recvc chan", msgt, msgn)
+					t.Fatalf("%d: cannot receive %s on recvc chan", msgt, msgn)
 				}
 			}
 		}
@@ -97,7 +97,7 @@ func TestNodeStepUnblock(t *testing.T) {
 		select {
 		case err := <-errc:
 			if err != tt.werr {
-				t.Errorf("#%d: err = %v, want %v", i, err, tt.werr)
+				t.Fatalf("#%d: err = %v, want %v", i, err, tt.werr)
 			}
 			//clean up side-effect
 			if ctx.Err() != nil {
@@ -109,7 +109,7 @@ func TestNodeStepUnblock(t *testing.T) {
 			default:
 			}
 		case <-time.After(1 * time.Second):
-			t.Errorf("#%d: failed to unblock step", i)
+			t.Fatalf("#%d: failed to unblock step", i)
 		}
 	}
 }
@@ -130,7 +130,7 @@ func TestReadyContainUpdates(t *testing.T) {
 
 	for i, tt := range tests {
 		if g := containsUpdates(tt.rd); g != tt.wcontain {
-			t.Errorf("#%d: containUpdates = %v, want %v", i, g, tt.wcontain)
+			t.Fatalf("#%d: containUpdates = %v, want %v", i, g, tt.wcontain)
 		}
 	}
 }
@@ -146,11 +146,11 @@ func TestNodeStart(t *testing.T) {
 	cc := raftpb.ConfChange{Type: raftpb.ConfChangeAddNode, NodeID: 1}
 	ccdata, err := cc.Marshal()
 	if err != nil {
-		t.Errorf("unexpected marshal error: %v", err)
+		t.Fatalf("unexpected marshal error: %v", err)
 	}
 	wants := []raft.Ready{
 		{
-			//HardState: raftpb.HardState{Term: 1, Commit: 1, Vote: 0},
+			HardState: raftpb.HardState{},
 			Entries: []raftpb.Entry{
 				{Type: raftpb.EntryConfChange, Term: 1, Index: 1, Data: ccdata},
 			},
@@ -159,7 +159,7 @@ func TestNodeStart(t *testing.T) {
 			},
 		},
 		{
-			//HardState:        raftpb.HardState{Term: 2, Commit: 3, Vote: 1},
+			HardState:        raftpb.HardState{},
 			Entries:          []raftpb.Entry{{Term: 2, Index: 2, Data: []byte("foo")}},
 			CommittedEntries: []raftpb.Entry{{Term: 2, Index: 2, Data: []byte("foo")}},
 		},
@@ -178,7 +178,7 @@ func TestNodeStart(t *testing.T) {
 
 	g := <-n.Ready()
 	if !reflect.DeepEqual(g, wants[0]) {
-		t.Errorf("#%d: g = %+v,\n             w   %+v", 1, g, wants[0])
+		t.Fatalf("#%d: g = %+v,\n             w   %+v", 1, g, wants[0])
 	} else {
 		storage.Append(g.Entries)
 		n.Advance()
@@ -191,7 +191,7 @@ func TestNodeStart(t *testing.T) {
 
 	n.Propose(ctx, []byte("foo"))
 	if g2 := <-n.Ready(); !reflect.DeepEqual(g2, wants[1]) {
-		t.Errorf("#%d: g = %+v,\n             w   %+v", 2, g2, wants[1])
+		t.Fatalf("#%d: g = %+v,\n             w   %+v", 2, g2, wants[1])
 	} else {
 		storage.Append(g2.Entries)
 		n.Advance()
@@ -199,11 +199,11 @@ func TestNodeStart(t *testing.T) {
 
 	select {
 	case rd := <-n.Ready():
-		t.Errorf("unexpected Ready: %+v", rd)
+		t.Fatalf("unexpected Ready: %+v", rd)
 	case <-time.After(time.Millisecond):
 	}
 }
-/*
+
 func TestNodeRestart(t *testing.T) {
 	entries := []raftpb.Entry{
 		{Term: 1, Index: 1},
@@ -211,17 +211,17 @@ func TestNodeRestart(t *testing.T) {
 	}
 	st := raftpb.HardState{Term: 1, Commit: 1}
 
-	want := Ready{
-		HardState: st,
+	want := raft.Ready{
+		//HardState: st,
 		// commit up to index commit index in st
 		CommittedEntries: entries[:st.Commit],
 	}
 
-	storage := NewMemoryStorage()
+	storage := raft.NewMemoryStorage()
 	storage.SetHardState(st)
 	storage.Append(entries)
-	c := &Config{
-		ID:              1,
+	c := &raft.Config{
+		ID:              2,
 		ElectionTick:    10,
 		HeartbeatTick:   1,
 		Storage:         storage,
@@ -231,17 +231,17 @@ func TestNodeRestart(t *testing.T) {
 	n := RestartNode(c)
 	defer n.Stop()
 	if g := <-n.Ready(); !reflect.DeepEqual(g, want) {
-		t.Errorf("g = %+v,\n             w   %+v", g, want)
+		t.Fatalf("g = %+v,\n             w   %+v", g, want)
 	}
 	n.Advance()
 
 	select {
 	case rd := <-n.Ready():
-		t.Errorf("unexpected Ready: %+v", rd)
+		t.Fatalf("unexpected Ready: %+v", rd)
 	case <-time.After(time.Millisecond):
 	}
 }
-
+/*
 func TestNodeRestartFromSnapshot(t *testing.T) {
 	snap := raftpb.Snapshot{
 		Metadata: raftpb.SnapshotMetadata{
@@ -276,14 +276,14 @@ func TestNodeRestartFromSnapshot(t *testing.T) {
 	n := RestartNode(c)
 	defer n.Stop()
 	if g := <-n.Ready(); !reflect.DeepEqual(g, want) {
-		t.Errorf("g = %+v,\n             w   %+v", g, want)
+		t.Fatalf("g = %+v,\n             w   %+v", g, want)
 	} else {
 		n.Advance()
 	}
 
 	select {
 	case rd := <-n.Ready():
-		t.Errorf("unexpected Ready: %+v", rd)
+		t.Fatalf("unexpected Ready: %+v", rd)
 	case <-time.After(time.Millisecond):
 	}
 }
@@ -313,7 +313,7 @@ func TestNodeAdvance(t *testing.T) {
 	n.Propose(ctx, []byte("foo"))
 	select {
 	case rd = <-n.Ready():
-		t.Errorf("unexpected Ready before Advance: %+v", rd)
+		t.Fatalf("unexpected Ready before Advance: %+v", rd)
 	case <-time.After(time.Millisecond):
 	}
 	storage.Append(rd.Entries)
@@ -321,7 +321,7 @@ func TestNodeAdvance(t *testing.T) {
 	select {
 	case <-n.Ready():
 	case <-time.After(100 * time.Millisecond):
-		t.Errorf("expect Ready after Advance, but there is no Ready available")
+		t.Fatalf("expect Ready after Advance, but there is no Ready available")
 	}
 }
 
@@ -336,7 +336,7 @@ func TestSoftStateEqual(t *testing.T) {
 	}
 	for i, tt := range tests {
 		if g := tt.st.equal(&SoftState{}); g != tt.we {
-			t.Errorf("#%d, equal = %v, want %v", i, g, tt.we)
+			t.Fatalf("#%d, equal = %v, want %v", i, g, tt.we)
 		}
 	}
 }
@@ -354,7 +354,7 @@ func TestIsHardStateEqual(t *testing.T) {
 
 	for i, tt := range tests {
 		if isHardStateEqual(tt.st, emptyState) != tt.we {
-			t.Errorf("#%d, equal = %v, want %v", i, isHardStateEqual(tt.st, emptyState), tt.we)
+			t.Fatalf("#%d, equal = %v, want %v", i, isHardStateEqual(tt.st, emptyState), tt.we)
 		}
 	}
 }

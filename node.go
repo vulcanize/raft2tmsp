@@ -186,7 +186,7 @@ func newNode(c cfg.Config) node {
 	}
 }
 
-func (n *node) run(index uint64, initRD raft.Ready) {
+func (n *node) run(index uint64, prevterm uint64, initRD raft.Ready) {
 	//logger.SetLogLevel("error")
 
 	var propc chan pb.Message
@@ -195,15 +195,15 @@ func (n *node) run(index uint64, initRD raft.Ready) {
 	var advancec chan struct{}
 	var prevSoftSt *raft.SoftState
 	prevHardSt := emptyState
-	prevTerm := uint64(1)
+	prevTerm := prevterm
 
 	var lastHeight int
 	var lastIndex uint64 = index
 
 	for {
-		if advancec != nil && !containsUpdates(rd) {
+		if advancec != nil {
 			readyc = nil
-		} else if len(rd.Entries) == 0 {
+		} else if !containsUpdates(rd) {
 			var r core_types.TMResult
 
 			_, _ = n.tmrpcclient.Call("block", map[string]interface{}{"height": lastHeight + 1}, &r)
@@ -364,9 +364,7 @@ func StartNode(c *raft.Config, peers []raft.Peer) raft.Node {
 	n.logger = c.Logger
 	n.tnode, n.httprpcl = RunTMNode(config)
 
-	time.Sleep(5*time.Second)
-
-	go n.run(index, initRD)
+	go n.run(index, uint64(1), initRD)
 	return &n
 }
 
@@ -383,6 +381,20 @@ func RestartNode(c *raft.Config) raft.Node {
 	config.Set("rpc_laddr", fmt.Sprintf("tcp://0.0.0.0:%v", 46675 + c.ID))
 	config.Set("proxy_app", "nilapp")
 
+	hardState, confState, _ := c.Storage.InitialState()
+	prevTerm := hardState.Term
+	commitedEntries, _ := c.Storage.Entries(1, hardState.Commit+1, 0)
+
+	seeds := []string{}
+	for _, peerID := range confState.Nodes {
+		if peerID != c.ID {
+			seeds = append(seeds, fmt.Sprintf("0.0.0.0:%v", 46655 + peerID))
+		}
+	}
+	config.Set("seeds", strings.Join(seeds, ","))
+
+	initRD := raft.Ready{CommittedEntries: commitedEntries}
+
 	init_tm_files(config)
 
 	/* Create a raft2tmsp Node */
@@ -390,9 +402,7 @@ func RestartNode(c *raft.Config) raft.Node {
 	n.logger = c.Logger
 	n.tnode, n.httprpcl = RunTMNode(config)
 
-	time.Sleep(5*time.Second)
-
-	go n.run(1, raft.Ready{})
+	go n.run(1, prevTerm, initRD)
 	return &n
 }
 
