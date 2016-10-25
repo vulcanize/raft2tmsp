@@ -382,8 +382,9 @@ func RestartNode(c *raft.Config) raft.Node {
 	config.Set("proxy_app", "nilapp")
 
 	hardState, confState, _ := c.Storage.InitialState()
+	firstIndex, _ := c.Storage.FirstIndex()
 	prevTerm := hardState.Term
-	commitedEntries, _ := c.Storage.Entries(1, hardState.Commit+1, 0)
+	commitedEntries, _ := c.Storage.Entries(firstIndex, hardState.Commit+1, 0)
 
 	seeds := []string{}
 	for _, peerID := range confState.Nodes {
