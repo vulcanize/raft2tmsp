@@ -28,9 +28,10 @@ import (
 
 	. "github.com/tendermint/go-common"
 	cfg "github.com/tendermint/go-config"
-	//"github.com/tendermint/go-logger"
+	tmlogger "github.com/tendermint/go-logger"
 	"github.com/tendermint/go-p2p"
 	rpcclient "github.com/tendermint/go-rpc/client"
+	"github.com/tendermint/log15"
 
 	tmcfg "github.com/tendermint/tendermint/config/tendermint"
 	tmnode "github.com/tendermint/tendermint/node"
@@ -44,7 +45,7 @@ var (
 	emptyState = pb.HardState{}
 
 	// ErrStopped is returned by methods on Nodes that have been stopped.
-	ErrStopped = errors.New("raft: stopped")
+	ErrStopped = errors.New("tendermint: stopped")
 )
 
 func init_tm_files(c cfg.Config) {
@@ -150,16 +151,13 @@ func RunTMNode(config cfg.Config) (*tmnode.Node, net.Listener) {
 type node struct {
 	propc      chan pb.Message
 	recvc      chan pb.Message
-	confc      chan pb.ConfChange
-	confstatec chan pb.ConfState
 	readyc     chan raft.Ready
 	advancec   chan struct{}
 	tickc      chan struct{}
 	done       chan struct{}
 	stop       chan struct{}
-	status     chan chan raft.Status
 
-	logger raft.Logger
+	logger	   log15.Logger
 
 	tmrpcclient *rpcclient.ClientURI
 
@@ -171,8 +169,6 @@ func newNode(c cfg.Config) node {
 	return node{
 		propc:      make(chan pb.Message),
 		recvc:      make(chan pb.Message),
-		confc:      make(chan pb.ConfChange),
-		confstatec: make(chan pb.ConfState),
 		readyc:     make(chan raft.Ready),
 		advancec:   make(chan struct{}),
 		// make tickc a buffered chan, so raft node can buffer some ticks when the node
@@ -181,14 +177,12 @@ func newNode(c cfg.Config) node {
 		tickc:  make(chan struct{}, 128),
 		done:   make(chan struct{}),
 		stop:   make(chan struct{}),
-		status: make(chan chan raft.Status),
+		logger: tmlogger.New(),
 		tmrpcclient: rpcclient.NewClientURI(c.GetString("rpc_laddr")),
 	}
 }
 
 func (n *node) run(index uint64, prevterm uint64, initRD raft.Ready) {
-	//logger.SetLogLevel("error")
-
 	var propc chan pb.Message
 	var readyc chan raft.Ready
 	var rd raft.Ready = initRD
@@ -240,85 +234,37 @@ func (n *node) run(index uint64, prevterm uint64, initRD raft.Ready) {
 
 		select {
 		case m := <-propc:
-		/*
-		rnd, _ := rand.Int(rand.Reader, big.NewInt(256))
-		for _, b := range rnd.Bytes() {
-			data = append(data, b)
-		}
-		*/
+			/*
+			TODO: If wanted repeated equal tx data, a nounce must be appended
+			rnd, _ := rand.Int(rand.Reader, big.NewInt(256))
+			for _, b := range rnd.Bytes() {
+				data = append(data, b)
+			}
+			*/
 			var r core_types.TMResult
 
 			data := m.Entries[0].Data
 			_, err := n.tmrpcclient.Call("broadcast_tx_commit", map[string]interface{}{"tx": data}, &r)
 
 			if err != nil {
-				n.logger.Error(err)
+				n.logger.Error(err.Error())
 			}
-
 		case m := <-n.recvc:
 			if m.Type == pb.MsgHup {
 				prevTerm++
 			}
-
-		/*
-		case cc := <-n.confc:
-			if cc.NodeID == None {
-				r.resetPendingConf()
-				select {
-				case n.confstatec <- pb.ConfState{Nodes: r.nodes()}:
-				case <-n.done:
-				}
-				break
-			}
-			switch cc.Type {
-			case pb.ConfChangeAddNode:
-				r.addNode(cc.NodeID)
-			case pb.ConfChangeRemoveNode:
-				// block incoming proposal when local node is
-				// removed
-				if cc.NodeID == r.id {
-					propc = nil
-				}
-				r.removeNode(cc.NodeID)
-			case pb.ConfChangeUpdateNode:
-				r.resetPendingConf()
-			default:
-				panic("unexpected conf type")
-			}
-				select {
-				case n.confstatec <- pb.ConfState{Nodes: r.nodes()}:
-				case <-n.done:
-				}
-		*/
 		case <-n.tickc:
-
 		case readyc <- rd:
 			rd = raft.Ready{}
 			advancec = n.advancec
 		case <-advancec:
-		/*
-		if prevHardSt.Commit != 0 {
-			r.raftLog.appliedTo(prevHardSt.Commit)
-		}
-		if havePrevLastUnstablei {
-			r.raftLog.stableTo(prevLastUnstablei, prevLastUnstablet)
-			havePrevLastUnstablei = false
-		}
-		r.raftLog.stableSnapTo(prevSnapi)
-		*/
 			advancec = nil
-		/*
-		case c := <-n.status:
-			c <- getStatus(r)
-		*/
 		case <-n.stop:
 			n.tnode.Stop()
 			n.httprpcl.Close()
 			close(n.done)
 			return
-
 		default:
-
 		}
 	}
 }
@@ -361,7 +307,6 @@ func StartNode(c *raft.Config, peers []raft.Peer) raft.Node {
 
 	/* Create a raft2tmsp Node */
 	n := newNode(config)
-	n.logger = c.Logger
 	n.tnode, n.httprpcl = RunTMNode(config)
 
 	go n.run(index, uint64(1), initRD)
@@ -400,7 +345,6 @@ func RestartNode(c *raft.Config) raft.Node {
 
 	/* Create a raft2tmsp Node */
 	n := newNode(config)
-	n.logger = c.Logger
 	n.tnode, n.httprpcl = RunTMNode(config)
 
 	go n.run(1, prevTerm, initRD)
@@ -419,14 +363,12 @@ func (n *node) Stop() {
 	<-n.done
 }
 
-// Tick increments the internal logical clock for this Node. Election timeouts
-// and heartbeat timeouts are in units of ticks.
 func (n *node) Tick() {
 	select {
 	case n.tickc <- struct{}{}:
 	case <-n.done:
 	default:
-		n.logger.Warningf("A tick missed to fire. Node blocks too long!")
+		n.logger.Warn("A tick missed to fire. Node blocks too long!")
 	}
 }
 
@@ -446,18 +388,9 @@ func (n *node) Step(ctx context.Context, m pb.Message) error {
 }
 
 func (n *node) ProposeConfChange(ctx context.Context, cc pb.ConfChange) error {
-	/*
-	data, err := cc.Marshal()
-	if err != nil {
-		return err
-	}
-	return n.Step(ctx, pb.Message{Type: pb.MsgProp, Entries: []pb.Entry{{Type: pb.EntryConfChange, Data: data}}})
-	*/
 	return nil
 }
 
-// Step advances the state machine using msgs. The ctx.Err() will be returned,
-// if any.
 func (n *node) step(ctx context.Context, m pb.Message) error {
 	ch := n.recvc
 	if m.Type == pb.MsgProp {
@@ -484,90 +417,22 @@ func (n *node) Advance() {
 }
 
 func (n *node) ApplyConfChange(cc pb.ConfChange) *pb.ConfState {
-	/*
-	var cs pb.ConfState
-	select {
-	case n.confc <- cc:
-	case <-n.done:
-	}
-	select {
-	case cs = <-n.confstatec:
-	case <-n.done:
-	}
-	return &cs
-	*/
 	return nil
 }
 
 func (n *node) Status() raft.Status {
-	/*
-	c := make(chan raft.Status)
-	n.status <- c
-	return <-c
-	*/
 	return raft.Status{}
 }
 
 func (n *node) ReportUnreachable(id uint64) {
-	/*
-	select {
-	case n.recvc <- pb.Message{Type: pb.MsgUnreachable, From: id}:
-	case <-n.done:
-	}
-	*/
 }
 
 func (n *node) ReportSnapshot(id uint64, status raft.SnapshotStatus) {
-	/*
-	rej := status == SnapshotFailure
-
-	select {
-	case n.recvc <- pb.Message{Type: pb.MsgSnapStatus, From: id, Reject: rej}:
-	case <-n.done:
-	}
-	*/
 }
 
 func (n *node) TransferLeadership(ctx context.Context, lead, transferee uint64) {
-	/*
-	select {
-	// manually set 'from' and 'to', so that leader can voluntarily transfers its leadership
-	case n.recvc <- pb.Message{Type: pb.MsgTransferLeader, From: transferee, To: lead}:
-	case <-n.done:
-	case <-ctx.Done():
-	}
-	*/
 }
 
 func (n *node) ReadIndex(ctx context.Context, rctx []byte) error {
-	/*
-	return n.step(ctx, pb.Message{Type: pb.MsgReadIndex, Entries: []pb.Entry{{Data: rctx}}})
-	*/
 	return nil
 }
-/*
-func newReady(r *raft, prevSoftSt *SoftState, prevHardSt pb.HardState) Ready {
-	rd := Ready{
-		Entries:          r.raftLog.unstableEntries(),
-		CommittedEntries: r.raftLog.nextEnts(),
-		Messages:         r.msgs,
-	}
-	if softSt := r.softState(); !softSt.equal(prevSoftSt) {
-		rd.SoftState = softSt
-	}
-	if hardSt := r.hardState(); !isHardStateEqual(hardSt, prevHardSt) {
-		rd.HardState = hardSt
-	}
-	if r.raftLog.unstable.snapshot != nil {
-		rd.Snapshot = *r.raftLog.unstable.snapshot
-	}
-	if r.readState.Index != None {
-		c := make([]byte, len(r.readState.RequestCtx))
-		copy(c, r.readState.RequestCtx)
-
-		rd.Index = r.readState.Index
-		rd.RequestCtx = c
-	}
-	return rd
-}
-*/
