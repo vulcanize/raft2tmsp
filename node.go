@@ -152,6 +152,7 @@ type node struct {
 	propc      chan pb.Message
 	recvc      chan pb.Message
 	readyc     chan raft.Ready
+	rd	   raft.Ready
 	advancec   chan struct{}
 	tickc      chan struct{}
 	done       chan struct{}
@@ -185,7 +186,6 @@ func newNode(c cfg.Config) node {
 func (n *node) run(index uint64, prevterm uint64, initRD raft.Ready) {
 	var propc chan pb.Message
 	var readyc chan raft.Ready
-	var rd raft.Ready = initRD
 	var advancec chan struct{}
 	var prevSoftSt *raft.SoftState
 	prevHardSt := emptyState
@@ -194,10 +194,12 @@ func (n *node) run(index uint64, prevterm uint64, initRD raft.Ready) {
 	var lastHeight int
 	var lastIndex uint64 = index
 
+	n.rd = initRD
+
 	for {
 		if advancec != nil {
 			readyc = nil
-		} else if !containsUpdates(rd) {
+		} else if !containsUpdates(n.rd) {
 			var r core_types.TMResult
 
 			_, _ = n.tmrpcclient.Call("block", map[string]interface{}{"height": lastHeight + 1}, &r)
@@ -208,14 +210,14 @@ func (n *node) run(index uint64, prevterm uint64, initRD raft.Ready) {
 				tx_num := res.BlockMeta.Header.NumTxs
 
 				if tx_num > 0 {
-					rd = raft.Ready{}
-					rd.SoftState = prevSoftSt
-					rd.HardState = prevHardSt
+					n.rd = raft.Ready{}
+					n.rd.SoftState = prevSoftSt
+					n.rd.HardState = prevHardSt
 					for i, tx := range res.Block.Data.Txs {
 						entry := pb.Entry{Data: tx, Type: pb.EntryNormal, Index: lastIndex + uint64(i+1),
 							Term: prevTerm}
-						rd.Entries = append(rd.Entries, entry)
-						rd.CommittedEntries = append(rd.CommittedEntries, entry)
+						n.rd.Entries = append(n.rd.Entries, entry)
+						n.rd.CommittedEntries = append(n.rd.CommittedEntries, entry)
 					}
 					lastIndex += uint64(res.BlockMeta.Header.NumTxs)
 
@@ -254,8 +256,8 @@ func (n *node) run(index uint64, prevterm uint64, initRD raft.Ready) {
 				prevTerm++
 			}
 		case <-n.tickc:
-		case readyc <- rd:
-			rd = raft.Ready{}
+		case readyc <- n.rd:
+			n.rd = raft.Ready{}
 			advancec = n.advancec
 		case <-advancec:
 			advancec = nil
@@ -408,6 +410,8 @@ func (n *node) step(ctx context.Context, m pb.Message) error {
 }
 
 func (n *node) Ready() <-chan raft.Ready { return n.readyc }
+
+func (n *node) GetReady() raft.Ready { return n.rd }
 
 func (n *node) Advance() {
 	select {
