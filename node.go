@@ -91,7 +91,7 @@ func reset_priv_validator(config cfg.Config) {
 func containsUpdates(rd raft.Ready) bool {
 	return rd.SoftState != nil || !raft.IsEmptyHardState(rd.HardState) ||
 		!raft.IsEmptySnap(rd.Snapshot) || len(rd.Entries) > 0 ||
-		len(rd.CommittedEntries) > 0 || len(rd.Messages) > 0 || rd.Index != raft.None
+		len(rd.CommittedEntries) > 0 || len(rd.Messages) > 0 || len(rd.ReadStates) != 0
 }
 
 func RunTMNode(config cfg.Config) (*tmnode.Node, net.Listener) {
@@ -149,36 +149,36 @@ func RunTMNode(config cfg.Config) (*tmnode.Node, net.Listener) {
 
 // node is the canonical implementation of the Node interface
 type node struct {
-	propc      chan pb.Message
-	recvc      chan pb.Message
-	readyc     chan raft.Ready
-	rd	   raft.Ready
-	advancec   chan struct{}
-	tickc      chan struct{}
-	done       chan struct{}
-	stop       chan struct{}
+	propc    chan pb.Message
+	recvc    chan pb.Message
+	readyc   chan raft.Ready
+	rd       raft.Ready
+	advancec chan struct{}
+	tickc    chan struct{}
+	done     chan struct{}
+	stop     chan struct{}
 
-	logger	   log15.Logger
+	logger log15.Logger
 
 	tmrpcclient *rpcclient.ClientURI
 
-	tnode *tmnode.Node
+	tnode    *tmnode.Node
 	httprpcl net.Listener
 }
 
 func newNode(c cfg.Config) node {
 	return node{
-		propc:      make(chan pb.Message),
-		recvc:      make(chan pb.Message),
-		readyc:     make(chan raft.Ready),
-		advancec:   make(chan struct{}),
+		propc:    make(chan pb.Message),
+		recvc:    make(chan pb.Message),
+		readyc:   make(chan raft.Ready),
+		advancec: make(chan struct{}),
 		// make tickc a buffered chan, so raft node can buffer some ticks when the node
 		// is busy processing raft messages. Raft node will resume process buffered
 		// ticks when it becomes idle.
-		tickc:  make(chan struct{}, 128),
-		done:   make(chan struct{}),
-		stop:   make(chan struct{}),
-		logger: tmlogger.New(),
+		tickc:       make(chan struct{}, 128),
+		done:        make(chan struct{}),
+		stop:        make(chan struct{}),
+		logger:      tmlogger.New(),
 		tmrpcclient: rpcclient.NewClientURI(c.GetString("rpc_laddr")),
 	}
 }
@@ -237,11 +237,11 @@ func (n *node) run(index uint64, prevterm uint64, initRD raft.Ready) {
 		select {
 		case m := <-propc:
 			/*
-			TODO: If wanted repeated equal tx data, a nounce must be appended
-			rnd, _ := rand.Int(rand.Reader, big.NewInt(256))
-			for _, b := range rnd.Bytes() {
-				data = append(data, b)
-			}
+				TODO: If wanted repeated equal tx data, a nounce must be appended
+				rnd, _ := rand.Int(rand.Reader, big.NewInt(256))
+				for _, b := range rnd.Bytes() {
+					data = append(data, b)
+				}
 			*/
 			var r core_types.TMResult
 
@@ -278,8 +278,8 @@ func StartNode(c *raft.Config, peers []raft.Peer) raft.Node {
 
 	config := tmcfg.GetConfig(fmt.Sprintf(".tendermint/node_%v", c.ID))
 	config.Set("node_id", c.ID)
-	config.Set("node_laddr", fmt.Sprintf("tcp://0.0.0.0:%v", 46659 + c.ID))
-	config.Set("rpc_laddr", fmt.Sprintf("tcp://0.0.0.0:%v", 46675 + c.ID))
+	config.Set("node_laddr", fmt.Sprintf("tcp://0.0.0.0:%v", 46659+c.ID))
+	config.Set("rpc_laddr", fmt.Sprintf("tcp://0.0.0.0:%v", 46675+c.ID))
 	config.Set("proxy_app", "nilapp")
 
 	index := uint64(0)
@@ -297,7 +297,7 @@ func StartNode(c *raft.Config, peers []raft.Peer) raft.Node {
 		index++
 
 		if peer.ID != c.ID {
-			seeds = append(seeds, fmt.Sprintf("0.0.0.0:%v", 46655 + peer.ID))
+			seeds = append(seeds, fmt.Sprintf("0.0.0.0:%v", 46655+peer.ID))
 		}
 	}
 	config.Set("seeds", strings.Join(seeds, ","))
@@ -324,8 +324,8 @@ func RestartNode(c *raft.Config) raft.Node {
 
 	config := tmcfg.GetConfig(fmt.Sprintf(".tendermint/node_%v", c.ID))
 	config.Set("node_id", c.ID)
-	config.Set("node_laddr", fmt.Sprintf("tcp://0.0.0.0:%v", 46659 + c.ID))
-	config.Set("rpc_laddr", fmt.Sprintf("tcp://0.0.0.0:%v", 46675 + c.ID))
+	config.Set("node_laddr", fmt.Sprintf("tcp://0.0.0.0:%v", 46659+c.ID))
+	config.Set("rpc_laddr", fmt.Sprintf("tcp://0.0.0.0:%v", 46675+c.ID))
 	config.Set("proxy_app", "nilapp")
 
 	hardState, confState, _ := c.Storage.InitialState()
@@ -336,7 +336,7 @@ func RestartNode(c *raft.Config) raft.Node {
 	seeds := []string{}
 	for _, peerID := range confState.Nodes {
 		if peerID != c.ID {
-			seeds = append(seeds, fmt.Sprintf("0.0.0.0:%v", 46655 + peerID))
+			seeds = append(seeds, fmt.Sprintf("0.0.0.0:%v", 46655+peerID))
 		}
 	}
 	config.Set("seeds", strings.Join(seeds, ","))
