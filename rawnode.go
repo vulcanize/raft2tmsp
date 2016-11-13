@@ -22,7 +22,7 @@ import (
 )
 
 type RawNode struct {
-	node	raft.Node
+	node raft.Node
 }
 
 // NewRawNode returns a new RawNode given configuration and a list of raft peers.
@@ -35,6 +35,10 @@ func NewRawNode(config *raft.Config, peers []raft.Peer) (*RawNode, error) {
 // Tick advances the internal logical clock by a single tick.
 func (rn *RawNode) Tick() {
 	rn.node.Tick()
+}
+
+func (rn *RawNode) TickQuiesced() {
+	//@TODO implement
 }
 
 // Campaign causes this RawNode to transition to candidate state.
