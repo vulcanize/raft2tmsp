@@ -28,4 +28,4 @@ github.com/tendermint/tmsp fe96cfc56da22842c185bd84601b156f8ecee78a
 golang.org/x/crypto 9477e0b78b9ac3d0b03822fd95422e2fe07627cd
 golang.org/x/net 569280fa63be4e201b975e5411e30a92178f0118
 golang.org/x/sys c200b10b5d5e122be351b67af224adc6128af5bf
-google.golang.org/grpc 0d9891286aca15aeb2b0a73be9f5946c3cfefa85
+google.golang.org/grpc b7f1379d3cbbbeb2ca3405852012e237aa05459e
