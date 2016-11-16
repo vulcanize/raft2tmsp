@@ -202,7 +202,12 @@ func (n *node) run(index uint64, prevterm uint64, initRD raft.Ready) {
 		} else if !containsUpdates(n.rd) {
 			var r core_types.TMResult
 
-			_, _ = n.tmrpcclient.Call("block", map[string]interface{}{"height": lastHeight + 1}, &r)
+			_, err := n.tmrpcclient.Call("block", map[string]interface{}{"height": lastHeight + 1}, &r)
+
+			if err != nil {
+				//n.logger.Error(err.Error())
+				panic("Could not call block " + err.Error())
+			}
 
 			if r != nil {
 				lastHeight++
@@ -249,7 +254,8 @@ func (n *node) run(index uint64, prevterm uint64, initRD raft.Ready) {
 			_, err := n.tmrpcclient.Call("broadcast_tx_commit", map[string]interface{}{"tx": data}, &r)
 
 			if err != nil {
-				n.logger.Error(err.Error())
+				panic("Could not call broadcast_tx_commit " + err.Error())
+				//n.logger.Error(err.Error())
 			}
 		case m := <-n.recvc:
 			if m.Type == pb.MsgHup {
@@ -278,8 +284,8 @@ func StartNode(c *raft.Config, peers []raft.Peer) raft.Node {
 
 	config := tmcfg.GetConfig(fmt.Sprintf(".tendermint/node_%v", c.ID))
 	config.Set("node_id", c.ID)
-	config.Set("node_laddr", fmt.Sprintf("tcp://0.0.0.0:%v", 46659+c.ID))
-	config.Set("rpc_laddr", fmt.Sprintf("tcp://0.0.0.0:%v", 46675+c.ID))
+	config.Set("node_laddr", fmt.Sprintf("tcp://127.0.0.1:%v", 46659+c.ID))
+	config.Set("rpc_laddr", fmt.Sprintf("tcp://127.0.0.1:%v", 46675+c.ID))
 	config.Set("proxy_app", "nilapp")
 
 	index := uint64(0)
@@ -297,7 +303,7 @@ func StartNode(c *raft.Config, peers []raft.Peer) raft.Node {
 		index++
 
 		if peer.ID != c.ID {
-			seeds = append(seeds, fmt.Sprintf("0.0.0.0:%v", 46655+peer.ID))
+			seeds = append(seeds, fmt.Sprintf("127.0.0.1:%v", 46655+peer.ID))
 		}
 	}
 	config.Set("seeds", strings.Join(seeds, ","))
@@ -324,8 +330,8 @@ func RestartNode(c *raft.Config) raft.Node {
 
 	config := tmcfg.GetConfig(fmt.Sprintf(".tendermint/node_%v", c.ID))
 	config.Set("node_id", c.ID)
-	config.Set("node_laddr", fmt.Sprintf("tcp://0.0.0.0:%v", 46659+c.ID))
-	config.Set("rpc_laddr", fmt.Sprintf("tcp://0.0.0.0:%v", 46675+c.ID))
+	config.Set("node_laddr", fmt.Sprintf("tcp://127.0.0.1:%v", 46659+c.ID))
+	config.Set("rpc_laddr", fmt.Sprintf("tcp://127.0.0.1:%v", 46675+c.ID))
 	config.Set("proxy_app", "nilapp")
 
 	hardState, confState, _ := c.Storage.InitialState()
@@ -336,7 +342,7 @@ func RestartNode(c *raft.Config) raft.Node {
 	seeds := []string{}
 	for _, peerID := range confState.Nodes {
 		if peerID != c.ID {
-			seeds = append(seeds, fmt.Sprintf("0.0.0.0:%v", 46655+peerID))
+			seeds = append(seeds, fmt.Sprintf("127.0.0.1:%v", 46655+peerID))
 		}
 	}
 	config.Set("seeds", strings.Join(seeds, ","))
